@@ -1,0 +1,5 @@
+**/build/
+**/.build/
+**/Backups/
+Shared/Updater/vendor/
+.DS_Store

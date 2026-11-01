@@ -1,0 +1,1220 @@
+import Foundation
+
+func L(_ key: String) -> String { NSLocalizedString(key, comment: "") }
+
+/// A hotkey in Carbon terms (kVK_* key code; ⌘256 ⇧512 ⌥2048 ⌃4096).
+/// taps: nil = press once, 2 = press twice in a row (Keyboard Maestro's "tapped twice").
+struct Hotkey: Codable, Hashable {
+    var code: UInt32
+    var modifiers: UInt32
+    var taps: Int?
+    var isDouble: Bool { taps == 2 }
+    /// The key itself, shared by its single and double press.
+    struct Key: Hashable { var code: UInt32; var modifiers: UInt32 }
+    var key: Key { Key(code: code, modifiers: modifiers) }
+}
+
+/// A saved step. Legacy menu cases remain decodable so existing libraries round-trip without data loss.
+enum Step: Codable, Hashable {
+    /// A script file run with do javascript.
+    case script(path: String)
+    case code(source: String)
+    /// Legacy command record, retained for decoding only; never executed.
+    case menuCommand(id: String, title: String?)
+    /// Legacy menu-title record, retained for decoding only; never executed.
+    case menuItem(path: [String])
+
+    var scriptPath: String? { if case .script(let path) = self { return path }; return nil }
+    var isSupported: Bool {
+        switch self { case .script, .code: return true; case .menuCommand, .menuItem: return false }
+    }
+    var exists: Bool {
+        if case .code(let source) = self { return !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return scriptPath.map { FileManager.default.fileExists(atPath: $0) } ?? true
+    }
+    var identity: String {
+        switch self {
+        case .script(let path): return path
+        case .code(let source): return "code:" + source
+        case .menuCommand(let id, _): return "command:" + id
+        case .menuItem(let path): return "menu:" + path.joined(separator: " > ")
+        }
+    }
+}
+
+/// Finder's standard tag palette; these are app item labels, never filesystem tags.
+enum ItemTag: String, Codable, CaseIterable {
+    case red, orange, yellow, green, blue, purple, gray
+}
+
+/// One registered script item; script files run in order by one hotkey.
+struct ScriptEntry: Codable, Identifiable, Hashable {
+    var id: String
+    var name: String
+    var path: String
+    var hotkey: Hotkey?
+    var enabled: Bool
+    /// nil = uncategorized.
+    var category: String?
+    /// The Keyboard Maestro macro it was imported from (turned off / on from Tools).
+    var kmUID: String?
+    /// The steps. nil in lists saved before 1.4.0: those items are their one script (path).
+    var componentIDs: [String]?
+    /// Values belong to each invocation, including repeated references to the same component.
+    var componentArguments: [[String]]?
+    func arguments(at index: Int) -> [String] {
+        guard let values = componentArguments, values.indices.contains(index), values[index].contains(where: { !$0.isEmpty }) else { return [] }
+        return Array((values[index] + ["", "", ""]).prefix(3))
+    }
+    mutating func setArgument(_ value: String, at step: Int, slot: Int) {
+        guard actions.indices.contains(step), (0..<3).contains(slot) else { return }
+        var values = actions.indices.map { arguments(at: $0) }
+        var row = Array((values[step] + ["", "", ""]).prefix(3))
+        row[slot] = value; values[step] = row
+        componentArguments = values.contains { $0.contains { !$0.isEmpty } } ? values : nil
+    }
+    var componentVariableNames: [[String]]?
+    func variableNames(at index: Int) -> [String] {
+        let row = componentVariableNames.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? []
+        return Array((row + ["", "", ""]).prefix(3))
+    }
+    func positionalArguments(at index: Int) -> [String] {
+        let values = arguments(at: index), names = variableNames(at: index)
+        guard !values.isEmpty else { return [] }
+        let row = values.enumerated().map { names[$0.offset].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? $0.element : "" }
+        return row.contains { !$0.isEmpty } ? row : []
+    }
+    mutating func setVariableName(_ name: String, at step: Int, slot: Int) {
+        guard actions.indices.contains(step), (0..<3).contains(slot) else { return }
+        var names = actions.indices.map { variableNames(at: $0) }
+        names[step][slot] = name
+        componentVariableNames = names.contains { $0.contains { !$0.isEmpty } } ? names : nil
+    }
+    var steps: [Step]?
+    /// The steps to run. Setting them keeps path on the first script, which older code and the import use.
+    var actions: [Step] {
+        get { steps ?? (path.isEmpty ? [] : [.script(path: path)]) }
+        set { steps = newValue; path = newValue.compactMap(\.scriptPath).first ?? "" }
+    }
+    /// What makes two items the same: the one step of a single-step item; a multi-step item is only itself.
+    var identity: String { actions.count == 1 ? actions[0].identity : "item:" + id }
+    init(id: String = UUID().uuidString, steps: [Step], name: String, hotkey: Hotkey? = nil, enabled: Bool = true) {
+        self.init(id: id, path: "", name: name, hotkey: hotkey, enabled: enabled)
+        actions = steps
+    }
+    /// Successful runs (hotkey or Run button) and the last one. Optional so lists saved by 1.0.0 still load.
+    var divider: Bool?
+    var isDivider: Bool { divider == true }
+    /// Only new automatically named entries opt in; legacy/user-provided names stay untouched.
+    var automaticName: String?
+    var userRenamed: Bool?
+    var tags: [String]?
+    var folderTags: [String]?
+    var allTags: [String] { Array(Set((tags ?? []) + (folderTags ?? []))).sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
+    var tagColor: ItemTag?
+    var notes: String?
+    var runCount: Int?
+    var lastRun: Date?
+    var uses: Int { runCount ?? 0 }
+
+    static let extensions: Set<String> = ["jsx", "js", "jsxbin"]
+    static func accepts(_ url: URL) -> Bool { extensions.contains(url.pathExtension.lowercased()) }
+    /// The file name without its extension: 「AlignToArtboard.jsx」 → 「AlignToArtboard」.
+    static func defaultName(for path: String) -> String {
+        if let description = ScriptMetadata.read(at: path)?.fields["Description-JA"]?.trimmingCharacters(in: .whitespacesAndNewlines), !description.isEmpty { return description }
+        return ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+    }
+    init(id: String = UUID().uuidString, path: String, name: String? = nil, hotkey: Hotkey? = nil, enabled: Bool = true) {
+        self.id = id; self.path = path; self.name = name ?? Self.defaultName(for: path); self.hotkey = hotkey; self.enabled = enabled
+        userRenamed = name == nil ? nil : true
+        automaticName = name == nil ? self.name : nil
+    }
+    mutating func refreshAutomaticName() {
+        guard userRenamed != true, !isDivider, actions.count == 1, let path = actions[0].scriptPath else { return }
+        let fileName = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        if let previous = automaticName { guard name == previous else { return } }
+        else { guard name == fileName else { return } }
+        name = Self.defaultName(for: path); automaticName = name
+    }
+    var fileExists: Bool { FileManager.default.fileExists(atPath: path) }
+    /// Never execute only the script portion of a legacy mixed item. Keep its data for explicit editing.
+    var hasUnsupportedSteps: Bool { actions.contains { !$0.isSupported } }
+    var scriptsOnly: Bool { !actions.isEmpty && !hasUnsupportedSteps }
+    var isAvailable: Bool { scriptsOnly && actions.allSatisfy(\.exists) }
+    mutating func recordRun(at date: Date = Date()) { runCount = uses + 1; lastRun = date }
+}
+
+/// The registered scripts, kept in Application Support/VectorKeys/Scripts.json.
+struct Component: Codable, Identifiable, Hashable {
+    var id: String = UUID().uuidString
+    var name: String
+    var step: Step
+    var category: String?
+    var tags: [String]?
+    var folderTags: [String]?
+    var tagColor: ItemTag?
+    var notes: String?
+    var userRenamed: Bool?
+}
+
+struct Library: Codable, Equatable {
+    var components: [Component]?
+    var componentCategories: [String]?
+    var componentCategoryList: [String] {
+        var names = componentCategories ?? []
+        for name in (components ?? []).compactMap(\.category) where !names.contains(name) { names.append(name) }
+        return names
+    }
+    mutating func renameComponentCategory(_ old: String, to new: String) {
+        guard !new.isEmpty, !componentCategoryList.contains(new) else { return }
+        componentCategories = componentCategoryList.map { $0 == old ? new : $0 }
+        for i in (components ?? []).indices where components![i].category == old { components![i].category = new }
+    }
+    mutating func deleteComponentCategory(_ name: String) {
+        componentCategories = componentCategoryList.filter { $0 != name }
+        for i in (components ?? []).indices where components![i].category == name { components![i].category = nil }
+    }
+    /// Cached steps keep old exports readable; component references are authoritative.
+    mutating func reconcileComponents(previous: Library? = nil) {
+        var pool = components ?? []
+        for i in scripts.indices where !scripts[i].isDivider {
+            let old = previous?.scripts.first { $0.id == scripts[i].id }
+            let edited = old != nil && old!.actions != scripts[i].actions && old!.componentIDs == scripts[i].componentIDs
+            if scripts[i].componentIDs == nil || edited {
+                scripts[i].componentIDs = scripts[i].actions.map { step in
+                    if let existing = pool.first(where: { $0.step == step }) { return existing.id }
+                    let component = Component(name: step.scriptPath.map { ScriptEntry.defaultName(for: $0) } ?? L("code.title"), step: step)
+                    pool.append(component); return component.id
+                }
+            }
+            let ids = scripts[i].componentIDs ?? []
+            // Never silently execute a partial action when a reference is missing.
+            scripts[i].actions = ids.map { id in pool.first { $0.id == id }?.step ?? .menuCommand(id: "missing-component:" + id, title: nil) }
+        }
+        if componentCategories == nil {
+            componentCategories = categoryList
+            for i in pool.indices {
+                if let path = pool[i].step.scriptPath, pool[i].name != ScriptEntry.defaultName(for: path) { pool[i].userRenamed = true }
+                if let owner = scripts.first(where: { $0.componentIDs?.contains(pool[i].id) == true }) {
+                    pool[i].category = owner.category; pool[i].tags = owner.tags
+                    pool[i].folderTags = owner.folderTags; pool[i].tagColor = owner.tagColor; pool[i].notes = owner.notes
+                }
+            }
+        }
+        components = pool; version = 2
+    }
+    mutating func moveComponentReference(actionID: String, from: Int, by offset: Int) {
+        guard let i = scripts.firstIndex(where: { $0.id == actionID }), var ids = scripts[i].componentIDs,
+              ids.indices.contains(from), ids.indices.contains(from + offset) else { return }
+        var values = ids.indices.map { scripts[i].arguments(at: $0) }
+        var names = ids.indices.map { scripts[i].variableNames(at: $0) }
+        names.swapAt(from, from + offset)
+        values.swapAt(from, from + offset)
+        ids.swapAt(from, from + offset); scripts[i].componentIDs = ids
+        if scripts[i].componentArguments != nil { scripts[i].componentArguments = values }
+        if scripts[i].componentVariableNames != nil { scripts[i].componentVariableNames = names }
+    }
+    mutating func removeComponentReference(actionID: String, at index: Int) {
+        guard let i = scripts.firstIndex(where: { $0.id == actionID }), var ids = scripts[i].componentIDs, ids.indices.contains(index) else { return }
+        var values = ids.indices.map { scripts[i].arguments(at: $0) }
+        var names = ids.indices.map { scripts[i].variableNames(at: $0) }
+        names.remove(at: index)
+        values.remove(at: index)
+        ids.remove(at: index); scripts[i].componentIDs = ids
+        if scripts[i].componentArguments != nil { scripts[i].componentArguments = values }
+        if scripts[i].componentVariableNames != nil { scripts[i].componentVariableNames = names }
+    }
+    @discardableResult mutating func duplicateActions(_ ids: Set<String>) -> [String] {
+        var names = Set(scripts.map(\.name)), copies: [String] = [], result: [ScriptEntry] = []
+        for source in scripts {
+            result.append(source)
+            guard ids.contains(source.id), !source.isDivider else { continue }
+            var copy = source
+            copy.id = UUID().uuidString
+            let base = source.name + " " + L("action.copySuffix")
+            var name = base, number = 2
+            while names.contains(name) { name = base + " " + String(number); number += 1 }
+            copy.name = name; names.insert(name)
+            copy.hotkey = nil; copy.runCount = nil; copy.lastRun = nil; copy.kmUID = nil
+            copy.automaticName = nil; copy.userRenamed = true
+            result.append(copy); copies.append(copy.id)
+        }
+        scripts = result
+        return copies
+    }
+    var recentlyUsed: [ScriptEntry] {
+        Array(scripts.filter { !$0.isDivider && $0.lastRun != nil }.sorted {
+            if $0.lastRun != $1.lastRun { return $0.lastRun! > $1.lastRun! }
+            return $0.id < $1.id
+        }.prefix(10))
+    }
+
+    var version = 1
+    var scripts: [ScriptEntry] = []
+    /// Category names in the sidebar order. Optional so lists saved before 1.3.0 still load.
+    var categories: [String]?
+    var paletteHotkeys: [String: Hotkey]?
+    var paletteEnabled: [String: Bool]?
+    var paletteModes: [String: Int]?
+    func allowsPalette(_ category: String) -> Bool { paletteEnabled?[category] ?? true }
+    func paletteMode(_ category: String) -> Int { paletteModes?[category] ?? 0 }
+    mutating func sortSelected(_ ids: Set<String>, by order: SortOrder, keyName: (Hotkey) -> String) {
+        // Replace only selected slots in each category, preserving every unselected row.
+        for category in Set(scripts.filter { ids.contains($0.id) }.map { $0.category ?? "" }) {
+            var slots: [Int] = []
+            func flush() {
+                let sorted = order.sorted(slots.map { scripts[$0] }, keyName: keyName)
+                for (slot, entry) in zip(slots, sorted) { scripts[slot] = entry }
+                slots = []
+            }
+            for i in scripts.indices where (scripts[i].category ?? "") == category {
+                if scripts[i].isDivider { flush() }
+                else if ids.contains(scripts[i].id) { slots.append(i) }
+            }
+            flush()
+        }
+    }
+
+    mutating func refreshAutomaticNames(ids: Set<String>) {
+        for i in scripts.indices where ids.contains(scripts[i].id) { scripts[i].refreshAutomaticName() }
+    }
+    static var folder: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("VectorKeys", isDirectory: true)
+    }
+    static var file: URL { folder.appendingPathComponent("Scripts.json") }
+
+    static func load(from url: URL = file) -> Library {
+        guard let data = try? Data(contentsOf: url) else { return Library() }
+        guard var library = try? JSONDecoder().decode(Library.self, from: data) else { return Library() }
+        if library.version < 2 {
+            // Preserve the exact pre-migration bytes, once, before changing the in-memory model.
+            let backup = url.deletingPathExtension().appendingPathExtension("pre-components.json")
+            if !FileManager.default.fileExists(atPath: backup.path) {
+                do { try data.write(to: backup, options: .withoutOverwriting) }
+                catch { return library } // Do not migrate if backup cannot be made.
+            }
+        }
+        if library.componentCategories == nil {
+            let backup = url.deletingPathExtension().appendingPathExtension("pre-workspaces.json")
+            if !FileManager.default.fileExists(atPath: backup.path) {
+                do { try data.write(to: backup, options: .withoutOverwriting) } catch { return library }
+            }
+        }
+        let legacyWorkspaces = library.componentCategories == nil
+        library.reconcileComponents()
+        // A legacy app can rewrite its stale in-memory groups after a newer app deletes them.
+        // Keep the retirement record outside Scripts.json, which legacy versions overwrite.
+        if legacyWorkspaces,
+           let data = try? Data(contentsOf: retiredGroupsFile(for: url)),
+           let names = try? JSONDecoder().decode([String].self, from: data) {
+            for name in names { library.deleteCategory(name) }
+        }
+        return library
+    }
+    static func retiredGroupsFile(for url: URL) -> URL {
+        url.deletingPathExtension().appendingPathExtension("retired-legacy-groups.json")
+    }
+    /// Explicitly retired groups only. Modern, deliberately recreated groups remain valid.
+    mutating func retireLegacyActionGroups(_ names: Set<String>, at url: URL = file) throws {
+        let marker = Self.retiredGroupsFile(for: url)
+        let existing = (try? Data(contentsOf: marker)).flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(Set(existing).union(names).sorted()).write(to: marker, options: .atomic)
+        for name in names { deleteCategory(name) }
+    }
+    func save(to url: URL = file) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? Data(contentsOf: url), let old = try? JSONDecoder().decode(Library.self, from: data), old.version < 2 {
+            let backup = url.deletingPathExtension().appendingPathExtension("pre-components.json")
+            if !FileManager.default.fileExists(atPath: backup.path) { try data.write(to: backup, options: .withoutOverwriting) }
+        }
+        if let data = try? Data(contentsOf: url), let old = try? JSONDecoder().decode(Library.self, from: data), old.componentCategories == nil {
+            let backup = url.deletingPathExtension().appendingPathExtension("pre-workspaces.json")
+            if !FileManager.default.fileExists(atPath: backup.path) { try data.write(to: backup, options: .withoutOverwriting) }
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(self).write(to: url, options: .atomic)
+    }
+
+    /// Adds files not registered yet (same path = same script). Returns the new entries in the given order.
+    @discardableResult
+    mutating func add(paths: [String]) -> [ScriptEntry] {
+        add(entries: paths.map { ScriptEntry(path: $0) })
+    }
+    /// Adds entries not registered yet (the same file, command ID or menu path counts once), keeping their name, hotkey and on/off.
+    @discardableResult
+    mutating func add(entries: [ScriptEntry]) -> [ScriptEntry] {
+        var known = Set(scripts.map(\.identity))
+        var added: [ScriptEntry] = []
+        for entry in entries where entry.scriptsOnly && !known.contains(entry.identity) && entry.actions.allSatisfy({ $0.scriptPath.map { ScriptEntry.accepts(URL(fileURLWithPath: $0)) } ?? true }) {
+            known.insert(entry.identity)
+            added.append(entry)
+        }
+        scripts.append(contentsOf: added)
+        return added
+    }
+
+    // MARK: Categories
+
+    /// The sidebar categories: the saved order, then any name a script uses that the list lacks.
+    var categoryList: [String] {
+        var list = categories ?? []
+        for name in scripts.compactMap(\.category) where !list.contains(name) { list.append(name) }
+        return list
+    }
+    /// Adds a category (a name already there is kept once). Returns the trimmed name, or nil when empty.
+    @discardableResult
+    mutating func addCategory(_ name: String) -> String? {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        var list = categoryList
+        if !list.contains(name) { list.append(name) }
+        categories = list
+        return name
+    }
+    /// Renames a category and moves its scripts along. Renaming onto an existing name merges the two.
+    mutating func renameCategory(_ old: String, to new: String) {
+        let new = new.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !new.isEmpty, new != old else { return }
+        var list = categoryList
+        if list.contains(new) { list.removeAll { $0 == old } } else if let index = list.firstIndex(of: old) { list[index] = new }
+        categories = list
+        if let key = paletteHotkeys?.removeValue(forKey: old), paletteHotkeys?[new] == nil { paletteHotkeys?[new] = key }
+        if let value = paletteEnabled?.removeValue(forKey: old), paletteEnabled?[new] == nil { paletteEnabled?[new] = value }
+        if let value = paletteModes?.removeValue(forKey: old), paletteModes?[new] == nil { paletteModes?[new] = value }
+        for index in scripts.indices where scripts[index].category == old { scripts[index].category = new }
+    }
+    /// Removes a category; its scripts become uncategorized (nothing is deleted).
+    mutating func deleteCategory(_ name: String) {
+        categories = categoryList.filter { $0 != name }
+        paletteHotkeys?.removeValue(forKey: name)
+        paletteEnabled?.removeValue(forKey: name)
+        paletteModes?.removeValue(forKey: name)
+        for index in scripts.indices where scripts[index].category == name { scripts[index].category = nil }
+    }
+    mutating func setCategory(_ name: String?, for ids: Set<String>) {
+        if let name { addCategory(name) }
+        for index in scripts.indices where ids.contains(scripts[index].id) { scripts[index].category = name }
+    }
+    /// Moves within a shown subset (one category, in list order) and writes the new order back into the full list.
+    mutating func move(ids: [String], from source: IndexSet, to destination: Int) {
+        // Array.move(fromOffsets:toOffset:) lives in SwiftUI; this file stays Foundation-only for the tests.
+        let picked = source.map { ids[$0] }
+        var moved = ids.enumerated().filter { !source.contains($0.offset) }.map(\.element)
+        let insertAt = destination - source.filter { $0 < destination }.count
+        moved.insert(contentsOf: picked, at: max(0, min(insertAt, moved.count)))
+        let members = Set(ids)
+        var next = moved.makeIterator()
+        let byID = Dictionary(uniqueKeysWithValues: scripts.map { ($0.id, $0) })
+        for index in scripts.indices where members.contains(scripts[index].id) {
+            if let id = next.next(), let script = byID[id] { scripts[index] = script }
+        }
+    }
+
+    /// Removes Keyboard Maestro numbering from the start of the names: 「11)」「21）」「11)1 」 (a digit right after
+    /// the bracket stays when it is part of the name, as in 「12)3Dにする」). Returns how many names changed.
+    @discardableResult
+    mutating func stripNumbering(ids: Set<String>) -> Int {
+        var changed = 0
+        for index in scripts.indices where ids.contains(scripts[index].id) {
+            let stripped = Self.strippingNumbering(scripts[index].name)
+            if stripped != scripts[index].name && !stripped.isEmpty { scripts[index].name = stripped; scripts[index].automaticName = nil; scripts[index].userRenamed = true; changed += 1 }
+        }
+        return changed
+    }
+    static func strippingNumbering(_ name: String) -> String {
+        name.replacingOccurrences(of: #"^\s*\d+\s*[)）]\s*(\d+\s+)?"#, with: "", options: .regularExpression)
+    }
+
+    /// Find and replace in a name. nil when the regular expression is invalid; an empty result keeps the old name.
+    static func replacing(in name: String, find: String, with replacement: String, regex: Bool, caseSensitive: Bool) -> String? {
+        guard !find.isEmpty else { return name }
+        var options: String.CompareOptions = regex ? [.regularExpression] : []
+        if !caseSensitive { options.insert(.caseInsensitive) }
+        if regex {
+            guard (try? NSRegularExpression(pattern: find, options: caseSensitive ? [] : [.caseInsensitive])) != nil else { return nil }
+        }
+        // A literal replacement must not read $1 or \ as template characters.
+        let template = regex ? replacement : NSRegularExpression.escapedTemplate(for: replacement)
+        let pattern = regex ? find : NSRegularExpression.escapedPattern(for: find)
+        let result = name.replacingOccurrences(of: pattern, with: template, options: options.union(.regularExpression))
+        let trimmed = result.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? name : trimmed
+    }
+    /// Applies replacing(in:…) to the names of the given scripts. Returns how many changed (0 for an invalid pattern).
+    @discardableResult
+    mutating func replaceNames(ids: Set<String>, find: String, with replacement: String, regex: Bool, caseSensitive: Bool) -> Int {
+        var changed = 0
+        for index in scripts.indices where ids.contains(scripts[index].id) {
+            guard let new = Self.replacing(in: scripts[index].name, find: find, with: replacement, regex: regex, caseSensitive: caseSensitive) else { return 0 }
+            if new != scripts[index].name { scripts[index].name = new; scripts[index].automaticName = nil; scripts[index].userRenamed = true; changed += 1 }
+        }
+        return changed
+    }
+
+    /// Every script by use: most runs first, then the latest run, then name (scripts never run come last).
+    var byUse: [ScriptEntry] {
+        scripts.filter { !$0.isDivider }.sorted { a, b in
+            if a.uses != b.uses { return a.uses > b.uses }
+            if a.lastRun != b.lastRun { return (a.lastRun ?? .distantPast) > (b.lastRun ?? .distantPast) }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
+        }
+    }
+
+    // MARK: Hotkeys
+
+    /// Scripts that would react to a hotkey: enabled and with a key, the first one in the list winning a repeated key
+    /// (a single and a double press of the same key are different hotkeys).
+    /// Returns the winners and the ids that lose to an earlier script.
+    func activeHotkeys() -> (winners: [(Hotkey, String)], duplicates: Set<String>) {
+        var seen: Set<Hotkey> = [], winners: [(Hotkey, String)] = [], duplicates: Set<String> = []
+        for script in scripts where script.enabled && script.scriptsOnly {
+            guard let hotkey = script.hotkey else { continue }
+            if seen.contains(hotkey) { duplicates.insert(script.id); continue }
+            seen.insert(hotkey); winners.append((hotkey, script.id))
+        }
+        return (winners, duplicates)
+    }
+    /// One registration per key: the script for a single press and the one for a double press.
+    func keyTargets() -> [(key: Hotkey.Key, single: String?, double: String?)] {
+        var order: [Hotkey.Key] = [], single: [Hotkey.Key: String] = [:], double: [Hotkey.Key: String] = [:]
+        for (hotkey, id) in activeHotkeys().winners {
+            if single[hotkey.key] == nil && double[hotkey.key] == nil { order.append(hotkey.key) }
+            if hotkey.isDouble { double[hotkey.key] = id } else { single[hotkey.key] = id }
+        }
+        return order.map { ($0, single[$0], double[$0]) }
+    }
+}
+
+/// How the list is shown (the saved order stays as it is).
+enum SortOrder: String, CaseIterable {
+    case manual, name, uses, hotkey
+    func sorted(_ scripts: [ScriptEntry], keyName: (Hotkey) -> String) -> [ScriptEntry] {
+        var result: [ScriptEntry] = [], block: [ScriptEntry] = []
+        for script in scripts {
+            if script.isDivider { result += sortedBlock(block, keyName: keyName); block = []; result.append(script) }
+            else { block.append(script) }
+        }
+        return result + sortedBlock(block, keyName: keyName)
+    }
+    private func sortedBlock(_ scripts: [ScriptEntry], keyName: (Hotkey) -> String) -> [ScriptEntry] {
+        switch self {
+        case .manual: return scripts
+        case .name: return scripts.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        case .uses: return scripts.sorted { $0.uses > $1.uses }
+        case .hotkey:
+            // Scripts with a key first, by the key's name, then fewer modifiers, then single before double press.
+            return scripts.sorted { a, b in
+                switch (a.hotkey, b.hotkey) {
+                case (nil, nil): return a.name.localizedStandardCompare(b.name) == .orderedAscending
+                case (nil, _): return false
+                case (_, nil): return true
+                case let (x?, y?):
+                    let nx = keyName(x), ny = keyName(y)
+                    if nx != ny { return nx.localizedStandardCompare(ny) == .orderedAscending }
+                    return false // Equal letter: keep the existing order, ignoring modifiers and tap count.
+                }
+            }
+        }
+    }
+}
+
+enum ScriptText {
+    static func quote(_ text: String) -> String {
+        "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+    /// Runs the file with `do javascript`, addressing Illustrator by its path so the one in front is used when several versions are open.
+    /// A long timeout: scripts that open a dialog box keep `do javascript` waiting until it is closed.
+    static func argumentClause(_ values: [String]) -> String {
+        values.isEmpty ? "" : " with arguments {" + values.map(quote).joined(separator: ", ") + "}"
+    }
+    static func appleScript(appPath: String, code: String, arguments: [String] = []) -> String {
+        "with timeout of 3600 seconds\ntell application \(quote(appPath))\ndo javascript \(quote(code))\(argumentClause(arguments))\nend tell\nend timeout"
+    }
+    static func appleScript(appPath: String, file: String, arguments: [String] = []) -> String {
+        """
+        with timeout of 3600 seconds
+        tell application \(quote(appPath))
+        do javascript (POSIX file \(quote(file)) as alias)\(argumentClause(arguments))
+        end tell
+        end timeout
+        """
+    }
+}
+
+/// osascript, so a hung script can be stopped without blocking the app.
+enum OSAScript {
+    enum Result: Equatable { case output(String), automationDenied, failed(String) }
+    static func run(_ source: String) -> Result {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-"]
+        let input = Pipe(), output = Pipe(), error = Pipe()
+        process.standardInput = input; process.standardOutput = output; process.standardError = error
+        do { try process.run() } catch { return .failed(error.localizedDescription) }
+        input.fileHandleForWriting.write(source.data(using: .utf8)!)
+        try? input.fileHandleForWriting.close()
+        var errorData = Data()
+        let group = DispatchGroup(); group.enter()
+        DispatchQueue.global().async { errorData = error.fileHandleForReading.readDataToEndOfFile(); group.leave() }
+        let out = output.fileHandleForReading.readDataToEndOfFile()
+        group.wait()
+        process.waitUntilExit()
+        let message = (String(data: errorData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0 else {
+            if message.contains("-1743") { return .automationDenied }
+            return .failed(cleanError(message))
+        }
+        return .output((String(data: out, encoding: .utf8) ?? "").trimmingCharacters(in: .newlines))
+    }
+    /// "-: execution error: Adobe Illustratorでエラーが起きました：Error 21: undefined is not an object (-2700)" → the message part.
+    static func cleanError(_ message: String) -> String {
+        var text = message
+        if let range = text.range(of: "execution error: ") { text = String(text[range.upperBound...]) }
+        if let range = text.range(of: "：") ?? text.range(of: ": ") { text = String(text[range.upperBound...]) }
+        if let range = text.range(of: " (", options: .backwards), text.hasSuffix(")") { text = String(text[..<range.lowerBound]) }
+        text = text.replacingOccurrences(of: "\r", with: " ")
+        return text.isEmpty ? message : text
+    }
+}
+
+/// Read local metadata as text; never execute scripts or follow metadata URLs automatically.
+enum ScriptMetadata {
+    struct Info: Equatable {
+        var fields: [String: String] = [:]
+        var summary = ""
+        var version: String? {
+            guard let value = fields["Version"], !value.isEmpty, value.count <= 64 else { return nil }
+            return value
+        }
+        var codeURL: URL? { Self.webURL(fields["Code-URL"]) ?? Self.webURL(fields["Source-URL"]) }
+        var url: URL? {
+            Self.webURL(fields["Article-URL"]) ?? Self.webURL(fields["Meta-URL"])
+        }
+        func readmeURL(language: String) -> URL? {
+            let preferred = language.lowercased().hasPrefix("ja") ? "README-JA" : "README-EN"
+            let fallback = preferred == "README-JA" ? "README-EN" : "README-JA"
+            return Self.webURL(fields[preferred]) ?? Self.webURL(fields[fallback])
+        }
+        private static func webURL(_ text: String?) -> URL? {
+            guard let text, let url = URL(string: text), ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return nil }
+            return url
+        }
+    }
+    static func parse(_ source: String) -> Info? {
+        var fields = variables(in: source)
+        let tags = parseTags(source)
+        if let tags { fields.merge(tags.fields) { _, tagged in tagged } }
+        guard !fields.isEmpty || tags != nil else { return nil }
+        return Info(fields: fields, summary: tags?.summary ?? "")
+    }
+    private static func parseTags(_ source: String) -> Info? {
+        let lines = source.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+        var inside = false, description = false
+        var info = Info(), summary: [String] = []
+        for raw in lines {
+            var line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("//") { line = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces) }
+            else if line.hasPrefix("*") { line = String(line.dropFirst()).trimmingCharacters(in: .whitespaces) }
+            if !inside {
+                if line == "SCRIPTMETA-BEGIN" { inside = true; info = Info(); summary = [] }
+                continue
+            }
+            if description {
+                if line == "Description-END" { description = false }
+                else { summary.append(line) }
+                continue
+            }
+            if line == "Description-BEGIN" { description = true; continue }
+            if line == "SCRIPTMETA-END" {
+                if let id = info.fields["Script-ID"], !id.isEmpty {
+                    info.summary = summary.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                    return info
+                }
+                inside = false
+                continue
+            }
+            let pair = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pair.count == 2 else { continue }
+            let key = pair[0].trimmingCharacters(in: .whitespaces)
+            let value = pair[1].trimmingCharacters(in: .whitespaces)
+            info.fields[key] = value
+        }
+        return nil
+    }
+    static func read(at path: String) -> Info? {
+        guard (path as NSString).pathExtension.lowercased() != "jsxbin", let file = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? file.close() }
+        guard let data = try? file.read(upToCount: 262144), let text = String(data: data, encoding: .utf8) else { return nil }
+        return parse(text)
+    }
+    static func version(in source: String) -> String? { parse(source)?.version }
+    static func version(at path: String) -> String? { read(at: path)?.version }
+    static func readme(for path: String) -> URL? {
+        let script = URL(fileURLWithPath: path)
+        let folder = script.deletingLastPathComponent()
+        let candidates = [script.deletingPathExtension().appendingPathExtension("md"),
+                          folder.appendingPathComponent("README.md"), folder.appendingPathComponent("README.txt")]
+        return candidates.first { url in
+            var directory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &directory) && !directory.boolValue
+        }
+    }
+}
+
+extension ScriptMetadata {
+    static func variables(in source: String) -> [String: String] {
+        let names = ["SCRIPT_DESCRIPTION_JA": "Description-JA", "SCRIPT_CODE_URL": "Code-URL", "SCRIPT_GITHUB_URL": "Code-URL", "SCRIPT_NAME": "Name", "SCRIPT_VERSION": "Version", "SCRIPT_AUTHOR": "Author",
+                     "SCRIPT_RELEASED": "First-Release-Date", "SCRIPT_UPDATED": "Updated-Date",
+                     "SCRIPT_README_JA": "README-JA", "SCRIPT_README_EN": "README-EN", "SCRIPT_ARTICLE_URL": "Article-URL"]
+        let pattern = #"//[^\r\n]*|/\*[\s\S]*?\*/|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|[A-Za-z_$][A-Za-z0-9_$]*|[^\s]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [:] }
+        let text = source as NSString
+        let tokens = regex.matches(in: source, range: NSRange(location: 0, length: text.length)).map { text.substring(with: $0.range) }
+            .filter { !$0.hasPrefix("//") && !$0.hasPrefix("/*") }
+        guard tokens.count >= 4 else { return [:] }
+        var result: [String: String] = [:]
+        for i in 0...(tokens.count - 4) {
+            guard ["var", "let", "const"].contains(tokens[i]), let field = names[tokens[i + 1]], tokens[i + 2] == "=" else { continue }
+            guard i + 4 == tokens.count || [";", ","].contains(tokens[i + 4]), let value = literal(tokens[i + 3]), !value.isEmpty else { continue }
+            result[field] = value
+        }
+        return result
+    }
+    private static func literal(_ token: String) -> String? {
+        guard let quote = token.first, ["\"", "'"].contains(quote), token.last == quote else { return nil }
+        let chars = Array(token.dropFirst().dropLast())
+        var result = "", i = 0
+        while i < chars.count {
+            let char = chars[i]; i += 1
+            if char != "\\" { result.append(char); continue }
+            guard i < chars.count else { return nil }
+            let escaped = chars[i]; i += 1
+            switch escaped {
+            case "\\", "\"", "'", "/": result.append(escaped)
+            case "n": result.append("\n")
+            case "r": result.append("\r")
+            case "t": result.append("\t")
+            case "b": result.append("\u{8}")
+            case "f": result.append("\u{c}")
+            case "u", "x":
+                let count = escaped == "u" ? 4 : 2
+                guard i + count <= chars.count, let number = UInt32(String(chars[i..<(i + count)]), radix: 16), let scalar = UnicodeScalar(number) else { return nil }
+                result.unicodeScalars.append(scalar); i += count
+            default: return nil
+            }
+        }
+        return result
+    }
+}
+
+
+extension ScriptMetadata {
+    /// Select only links to this exact script. A repository/homepage alone is not proof.
+    static func codeURL(in readme: String, scriptFilename: String, relativeTo base: URL? = nil) -> URL? {
+        guard !scriptFilename.isEmpty,
+              let regex = try? NSRegularExpression(pattern: #"https?://[^\s<>"\)\]]+|(?<=\]\()[^\s\)]+"#) else { return nil }
+        let text = readme as NSString
+        var candidates: [String: URL] = [:]
+        for match in regex.matches(in: readme, range: NSRange(location: 0, length: text.length)) {
+            let token = text.substring(with: match.range).replacingOccurrences(of: "&amp;", with: "&")
+            guard let url = URL(string: token, relativeTo: base)?.absoluteURL,
+                  ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.host != nil,
+                  url.lastPathComponent.removingPercentEncoding?.caseInsensitiveCompare(scriptFilename) == .orderedSame else { continue }
+            var normalized = URLComponents(url: url, resolvingAgainstBaseURL: true)
+            normalized?.query = nil; normalized?.fragment = nil
+            if url.host?.lowercased() == "raw.githubusercontent.com" {
+                let parts = url.pathComponents.filter { $0 != "/" }
+                if parts.count >= 4 {
+                    normalized?.host = "github.com"
+                    normalized?.path = "/" + (Array(parts.prefix(2)) + ["blob"] + Array(parts.dropFirst(2))).joined(separator: "/")
+                }
+            }
+            if let canonical = normalized?.url { candidates[canonical.absoluteString] = canonical }
+        }
+        return candidates.count == 1 ? candidates.values.first : nil
+    }
+    static func readText(at url: URL) -> String? {
+        guard url.isFileURL, let file = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? file.close() }
+        guard let data = try? file.read(upToCount: 524288) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+    static func readmeRequestURL(_ url: URL) -> URL? {
+        guard ["https", "http"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { return nil }
+        if url.host?.lowercased() == "github.com" {
+            var parts = url.pathComponents.filter { $0 != "/" }
+            guard parts.count >= 5, parts[2] == "blob" else { return nil }
+            parts.remove(at: 2)
+            var components = URLComponents()
+            components.scheme = "https"; components.host = "raw.githubusercontent.com"
+            components.path = "/" + parts.joined(separator: "/")
+            return components.url
+        }
+        return url
+    }
+}
+
+
+/// Read-only folder discovery. Never executes scripts or follows directory symlinks.
+enum WatchedScripts {
+    struct Scan { var files: [String: Set<String>] = [:]; var groups: Set<String> = []; var fileGroups: [String: Set<String>] = [:]; var errors: [String] = [] }
+    static func scan(_ roots: [String], excluding names: [String] = []) -> Scan {
+        var result = Scan()
+        let fm = FileManager.default
+        let excluded = Set(names.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty })
+        for path in roots {
+            let root = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            guard let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]), values.isDirectory == true, values.isSymbolicLink != true,
+                  let listing = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { url, _ in result.errors.append(url.path); return true }) else {
+                result.errors.append(path); continue
+            }
+            for case let url as URL in listing {
+                guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]) else { continue }
+                if values.isSymbolicLink == true { listing.skipDescendants(); continue }
+                if values.isDirectory == true && excluded.contains(url.lastPathComponent.lowercased()) { listing.skipDescendants(); continue }
+                let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+                let canonical = url.resolvingSymlinksInPath()
+                guard canonical.path.hasPrefix(prefix) else { continue }
+                let relative = String(canonical.path.dropFirst(prefix.count))
+                if values.isDirectory == true { result.groups.insert(relative); continue }
+                guard values.isRegularFile == true, ScriptEntry.accepts(url) else { continue }
+                let folders = relative.split(separator: "/").dropLast().map(String.init)
+                if !folders.isEmpty { result.fileGroups[canonical.path, default: []].insert(folders.joined(separator: "/")) }
+                result.files[canonical.path, default: []].formUnion(folders)
+            }
+        }
+        return result
+    }
+    @discardableResult static func merge(_ scan: Scan, into library: inout Library, ignoring: Set<String> = [], autoGroup: Bool = false, componentsOnly: Bool = false) -> Int {
+        var added = 0
+        if componentsOnly {
+            library.reconcileComponents()
+            var pool = library.components ?? []
+            var groups = library.componentCategoryList
+            if autoGroup { for group in scan.groups.sorted() where !groups.contains(group) { groups.append(group) } }
+            for path in scan.files.keys.sorted() {
+                if let i = pool.firstIndex(where: { $0.step.scriptPath.map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path == path } ?? false }) {
+                    pool[i].folderTags = Array(Set(pool[i].folderTags ?? []).union(scan.files[path] ?? [])).sorted()
+                    if autoGroup, pool[i].category == nil, let names = scan.fileGroups[path], names.count == 1 { pool[i].category = names.first }
+                } else if !ignoring.contains(path) {
+                    var component = Component(name: ScriptEntry.defaultName(for: path), step: .script(path: path))
+                    component.folderTags = Array(scan.files[path] ?? []).sorted()
+                    if autoGroup, let names = scan.fileGroups[path], names.count == 1 { component.category = names.first }
+                    pool.append(component); added += 1
+                }
+            }
+            library.components = pool; library.componentCategories = groups
+            return added
+        }
+        if autoGroup { for group in scan.groups.sorted() { library.addCategory(group) } }
+        for path in scan.files.keys.sorted() where !ignoring.contains(path) {
+            let matches = library.scripts.indices.filter { library.scripts[$0].actions.contains { $0.scriptPath.map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path == path } ?? false } }
+            if matches.isEmpty {
+                var entry = ScriptEntry(path: path)
+                entry.folderTags = Array(scan.files[path] ?? []).sorted()
+                if autoGroup, let groups = scan.fileGroups[path], groups.count == 1 { entry.category = groups.first }
+                library.scripts.append(entry); added += 1
+            } else {
+                for i in matches {
+                    if autoGroup, library.scripts[i].category == nil, library.scripts[i].actions.count == 1, let groups = scan.fileGroups[path], groups.count == 1 { library.scripts[i].category = groups.first }
+                    library.scripts[i].folderTags = Array(Set(library.scripts[i].folderTags ?? []).union(scan.files[path] ?? [])).sorted()
+                }
+            }
+        }
+        return added
+    }
+}
+
+
+enum StatisticsColumn: String, CaseIterable { case rank, name, category, scriptName, path, uses, last, key }
+struct StatisticsRow: Identifiable {
+    let rank: Int, id: String, name: String, category: String, scriptName: String, path: String, uses: Int, last: Date?, key: String
+    func text(for column: StatisticsColumn) -> String {
+        switch column {
+        case .rank: return String(rank)
+        case .name: return name
+        case .category: return category
+        case .scriptName: return scriptName
+        case .path: return path
+        case .uses: return String(uses)
+        case .last: return last?.formatted(date: .numeric, time: .shortened) ?? ""
+        case .key: return key
+        }
+    }
+    static func sorted(_ rows: [Self], by column: StatisticsColumn, ascending: Bool) -> [Self] {
+        rows.sorted { a, b in
+            let result: ComparisonResult
+            switch column {
+            case .rank: result = a.rank == b.rank ? .orderedSame : a.rank < b.rank ? .orderedAscending : .orderedDescending
+            case .uses: result = a.uses == b.uses ? .orderedSame : a.uses < b.uses ? .orderedAscending : .orderedDescending
+            case .last:
+                let x = a.last ?? .distantPast, y = b.last ?? .distantPast
+                result = x.compare(y)
+            default: result = a.text(for: column).localizedStandardCompare(b.text(for: column))
+            }
+            if result == .orderedSame { return a.rank < b.rank }
+            return ascending ? result == .orderedAscending : result == .orderedDescending
+        }
+    }
+}
+
+
+enum PaletteSearch {
+    static func filter(_ scripts: [ScriptEntry], query: String) -> [ScriptEntry] {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return scripts }
+        return scripts.filter { script in
+            !script.isDivider && (script.name.localizedCaseInsensitiveContains(query) || script.actions.compactMap(\.scriptPath).contains { ($0 as NSString).lastPathComponent.localizedCaseInsensitiveContains(query) })
+        }
+    }
+}
+
+
+extension Library {
+    /// Only fields that affect registered keys. Text edits do not cancel pending taps.
+    struct KeyRegistrationState: Equatable {
+        struct Action: Equatable { let id: String; let hotkey: Hotkey?; let enabled: Bool; let supported: Bool; let category: String? }
+        let actions: [Action]
+        let categories: [String]
+        let hotkeys: [String: Hotkey]?
+        let enabled: [String: Bool]?
+        let modes: [String: Int]?
+    }
+    var keyRegistrationState: KeyRegistrationState {
+        KeyRegistrationState(actions: scripts.map { .init(id: $0.id, hotkey: $0.hotkey, enabled: $0.enabled, supported: $0.scriptsOnly, category: $0.category) }, categories: categoryList, hotkeys: paletteHotkeys, enabled: paletteEnabled, modes: paletteModes)
+    }
+    var metadataPaths: Set<String> { Set((scripts.flatMap(\.actions) + (components ?? []).map(\.step)).compactMap(\.scriptPath)) }
+}
+
+
+extension Library {
+    /// A component stays in its group; its new action belongs to the chosen category.
+    @discardableResult
+    mutating func addComponentAction(_ componentID: String, category: String?) -> String? {
+        guard let component = components?.first(where: { $0.id == componentID }) else { return nil }
+        if let existing = scripts.first(where: { !$0.isDivider && $0.componentIDs == [componentID] && $0.category == category }) { return existing.id }
+        if let category { addCategory(category) }
+        var action = ScriptEntry(steps: [component.step], name: component.name)
+        action.componentIDs = [component.id]; action.category = category
+        scripts.append(action)
+        return action.id
+    }
+}
+
+
+extension Library {
+    /// Filter through action references without changing a component's own classification.
+    func componentsUsed(by actionIDs: Set<String>) -> [Component] {
+        let ids = Set(scripts.filter { actionIDs.contains($0.id) }.flatMap { $0.componentIDs ?? [] })
+        return (components ?? []).filter { ids.contains($0.id) }
+    }
+}
+
+
+/// A single text payload carries all selected component IDs; no code or paths are exposed.
+enum ComponentDragPayload {
+    static let prefix = "VectorKeys.components:"
+    static func encode(_ ids: Set<String>) -> String { prefix + ids.sorted().joined(separator: ",") }
+    static func decode(_ text: String) -> Set<String> {
+        guard text.utf8.count <= 131072, text.hasPrefix(prefix) else { return [] }
+        let ids = text.dropFirst(prefix.count).split(separator: ",").map(String.init)
+        guard ids.count <= 2048 else { return [] }
+        return Set(ids.filter { !$0.isEmpty })
+    }
+}
+
+
+struct NamedLibraryItem: Identifiable {
+    let id: String
+    let name: String
+}
+extension Library {
+    func nameTargets(components componentMode: Bool, ids: Set<String>) -> [NamedLibraryItem] {
+        if componentMode { return (components ?? []).filter { ids.contains($0.id) }.map { .init(id: $0.id, name: $0.name) } }
+        return scripts.filter { ids.contains($0.id) && !$0.isDivider }.map { .init(id: $0.id, name: $0.name) }
+    }
+    @discardableResult mutating func replaceComponentNames(ids: Set<String>, find: String, with replacement: String, regex: Bool, caseSensitive: Bool) -> Int {
+        var changed = 0
+        for i in (components ?? []).indices where ids.contains(components![i].id) {
+            guard let name = Self.replacing(in: components![i].name, find: find, with: replacement, regex: regex, caseSensitive: caseSensitive) else { return 0 }
+            if name != components![i].name { components![i].name = name; components![i].userRenamed = true; changed += 1 }
+        }
+        return changed
+    }
+    @discardableResult mutating func stripComponentNumbering(ids: Set<String>) -> Int {
+        var changed = 0
+        for i in (components ?? []).indices where ids.contains(components![i].id) {
+            let name = Self.strippingNumbering(components![i].name)
+            if !name.isEmpty, name != components![i].name { components![i].name = name; components![i].userRenamed = true; changed += 1 }
+        }
+        return changed
+    }
+    func deletableComponents(_ ids: Set<String>) -> Set<String> {
+        let referenced = Set(scripts.flatMap { $0.componentIDs ?? [] })
+        return ids.intersection(Set((components ?? []).map(\.id))).subtracting(referenced)
+    }
+    mutating func setComponentCategory(_ category: String?, ids: Set<String>) {
+        if let category, !componentCategoryList.contains(category) { return }
+        for i in (components ?? []).indices where ids.contains(components![i].id) { components![i].category = category }
+    }
+    /// Returns canonical paths suppressed from watcher re-import. It never removes original files.
+    @discardableResult mutating func removeComponents(_ ids: Set<String>) -> Set<String>? {
+        guard !ids.isEmpty, deletableComponents(ids) == ids else { return nil }
+        let paths = Set((components ?? []).filter { ids.contains($0.id) }.compactMap { $0.step.scriptPath }.map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path })
+        components?.removeAll { ids.contains($0.id) }
+        return paths
+    }
+    @discardableResult mutating func placeActions(_ selected: Set<String>, before target: String?, within visible: [String]) -> Bool {
+        let visibleSet = Set(visible)
+        let existing = scripts.filter { visibleSet.contains($0.id) }
+        guard existing.count == visible.count, Set(existing.map { $0.category ?? "" }).count == 1,
+              !selected.isEmpty, selected.isSubset(of: visibleSet), target.map({ visibleSet.contains($0) && !selected.contains($0) }) ?? true else { return false }
+        let picked = visible.filter { selected.contains($0) }
+        var order = visible.filter { !selected.contains($0) }
+        let index = target.flatMap { order.firstIndex(of: $0) } ?? order.count
+        order.insert(contentsOf: picked, at: index)
+        guard order != visible else { return false }
+        let entries = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        var next = order.makeIterator()
+        for i in scripts.indices where visibleSet.contains(scripts[i].id) {
+            if let id = next.next(), let entry = entries[id] { scripts[i] = entry }
+        }
+        return true
+    }
+}
+enum ActionDragPayload {
+    static let prefix = "VectorKeys.actions:"
+    static func encode(_ ids: Set<String>) -> String { prefix + ids.sorted().joined(separator: ",") }
+    static func decode(_ text: String) -> Set<String> {
+        guard text.hasPrefix(prefix), text.utf8.count <= 131072 else { return [] }
+        return Set(text.dropFirst(prefix.count).split(separator: ",").map(String.init))
+    }
+}
+
+/// A deliberately narrow source transform: standalone var declarations with literal defaults.
+/// Comments, strings and regular-expression literals are opaque; ambiguous declarations stop execution.
+enum VariableOverrides {
+    struct Failure: LocalizedError {
+        let key: String
+        let name: String
+        var errorDescription: String? { String(format: L(key), name) }
+    }
+    struct Token { let text: String; let range: NSRange; let literalString: Bool }
+    private static func matches(_ text: String, _ pattern: String) -> Bool {
+        text.range(of: pattern, options: .regularExpression) != nil
+    }
+    private static func tokens(_ source: String) throws -> [Token] {
+        let ns = source as NSString, units = Array(source.utf16)
+        var result: [Token] = [], i = 0
+        func word(_ c: UInt16) -> Bool { c == 36 || c == 95 || (65...90).contains(c) || (97...122).contains(c) || (48...57).contains(c) || c > 127 }
+        func add(_ start: Int, _ end: Int, string: Bool = false) {
+            let range = NSRange(location: start, length: end - start)
+            result.append(Token(text: ns.substring(with: range), range: range, literalString: string))
+        }
+        while i < units.count {
+            let c = units[i]
+            if c == 32 || c == 9 || c == 10 || c == 13 || c == 0xfeff { i += 1; continue }
+            let start = i
+            if c == 47 && i + 1 < units.count && units[i + 1] == 47 {
+                i += 2; while i < units.count && units[i] != 10 && units[i] != 13 { i += 1 }; continue
+            }
+            if c == 47 && i + 1 < units.count && units[i + 1] == 42 {
+                i += 2
+                while i + 1 < units.count && !(units[i] == 42 && units[i + 1] == 47) { i += 1 }
+                guard i + 1 < units.count else { throw Failure(key: "override.syntax", name: "") }
+                i += 2; continue
+            }
+            if c == 34 || c == 39 || c == 96 {
+                i += 1; var closed = false
+                while i < units.count {
+                    if units[i] == 92 { i += 2; continue }
+                    if units[i] == c { i += 1; closed = true; break }
+                    i += 1
+                }
+                guard closed else { throw Failure(key: "override.syntax", name: "") }
+                add(start, i, string: c != 96); continue
+            }
+            // A slash where an operand can start denotes a regular-expression literal.
+            let regexAfter: Set<String> = ["=", "(", "[", ",", ":", ";", "!", "?", "return", "case", "&&", "||", "{", "}"]
+            if c == 47 && (result.isEmpty || regexAfter.contains(result.last!.text)) {
+                i += 1; var inClass = false, closed = false
+                while i < units.count && units[i] != 10 && units[i] != 13 {
+                    if units[i] == 92 { i += 2; continue }
+                    if units[i] == 91 { inClass = true }
+                    if units[i] == 93 { inClass = false }
+                    if units[i] == 47 && !inClass { i += 1; closed = true; break }
+                    i += 1
+                }
+                guard closed else { throw Failure(key: "override.syntax", name: "") }
+                while i < units.count && word(units[i]) { i += 1 }
+                add(start, i); continue
+            }
+            if (48...57).contains(c) || (c == 46 && i + 1 < units.count && (48...57).contains(units[i + 1])) {
+                i += 1
+                while i < units.count {
+                    let next = units[i]
+                    if word(next) || next == 46 { i += 1 }
+                    else if (next == 43 || next == 45) && (units[i - 1] == 101 || units[i - 1] == 69) { i += 1 }
+                    else { break }
+                }
+            } else if word(c) {
+                i += 1; while i < units.count && word(units[i]) { i += 1 }
+            } else { i += 1 }
+            add(start, i)
+        }
+        return result
+    }
+    struct Candidate: Hashable, Identifiable {
+        let name: String
+        let value: String
+        let literal: String
+        var id: String { name }
+    }
+    /// Decode literal strings only; never evaluate source to discover settings.
+    private static func stringValue(_ literal: String) -> String? {
+        let chars = Array(literal.utf16)
+        guard chars.count >= 2 else { return nil }
+        var output: [UInt16] = [], i = 1
+        let escapes: [UInt16: UInt16] = [110: 10, 114: 13, 116: 9, 98: 8, 102: 12, 118: 11]
+        while i < chars.count - 1 {
+            let c = chars[i]; i += 1
+            if c != 92 { output.append(c); continue }
+            guard i < chars.count - 1 else { return nil }
+            let next = chars[i]; i += 1
+            if let escaped = escapes[next] { output.append(escaped) }
+            else if next == 120 || next == 117 {
+                let count = next == 120 ? 2 : 4
+                guard i + count <= chars.count - 1 else { return nil }
+                let hex = String(decoding: chars[i..<i + count], as: UTF16.self)
+                guard let value = UInt16(hex, radix: 16) else { return nil }
+                output.append(value); i += count
+            } else if next == 10 { continue }
+            else if next == 13 { if i < chars.count - 1 && chars[i] == 10 { i += 1 } }
+            else if next == 48 {
+                guard i >= chars.count - 1 || !(48...57).contains(chars[i]) else { return nil }
+                output.append(0)
+            } else if (49...57).contains(next) { return nil }
+            else { output.append(next) }
+        }
+        return String(decoding: output, as: UTF16.self)
+    }
+    static func candidates(in source: String, file: Bool = false) -> [Candidate] {
+        guard let ts = try? tokens(source) else { return [] }
+        var found: [Candidate] = []
+        for i in ts.indices where ts[i].text == "var" {
+            guard i + 4 < ts.count else { continue }
+            let name = ts[i + 1].text
+            guard name.hasPrefix("SW_"), name.count > 3, ts[i + 2].text == "=" else { continue }
+            let start = i + 3
+            let end = ["+", "-"].contains(ts[start].text) ? start + 1 : start
+            guard end + 1 < ts.count, ts[end + 1].text == ";" else { continue }
+            let range = NSRange(location: ts[start].range.location, length: NSMaxRange(ts[end].range) - ts[start].range.location)
+            let literal = (source as NSString).substring(with: range)
+            let value: String
+            if ts[start].literalString {
+                guard let decoded = stringValue(literal) else { continue }
+                value = decoded
+            } else { value = literal }
+            // Discovery uses exactly the same supported-declaration checks as execution.
+            guard (try? apply(to: source, names: [name], values: [value], file: file)) != nil else { continue }
+            found.append(Candidate(name: name, value: value, literal: literal))
+        }
+        return found
+    }
+    static func candidates(for step: Step?) -> [Candidate] {
+        switch step {
+        case .code(let source): return candidates(in: source)
+        case .script(let path):
+            guard URL(fileURLWithPath: path).pathExtension.lowercased() != "jsxbin",
+                  let source = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+            return candidates(in: source, file: true)
+        default: return []
+        }
+    }
+    static func apply(to source: String, names: [String], values: [String], file: Bool = false) throws -> String {
+        let requests = names.enumerated().map { ($0.element.trimmingCharacters(in: .whitespacesAndNewlines), values.indices.contains($0.offset) ? values[$0.offset] : "") }.filter { !$0.0.isEmpty }
+        guard !requests.isEmpty else { return source }
+        var seen: Set<String> = []
+        for (name, _) in requests {
+            guard matches(name, #"^[A-Za-z_$][A-Za-z0-9_$]*$"#) else { throw Failure(key: "override.identifier", name: name) }
+            guard seen.insert(name).inserted else { throw Failure(key: "override.duplicate", name: name) }
+        }
+        let ts = try tokens(source)
+        if file {
+            for i in ts.indices {
+                if ts[i].text == "#", i + 1 < ts.count, ts[i + 1].text == "include" { throw Failure(key: "override.fileContext", name: "#include") }
+                if ts[i].text == "$", i + 2 < ts.count, ts[i + 1].text == ".", ["fileName", "evalFile"].contains(ts[i + 2].text) { throw Failure(key: "override.fileContext", name: "$.") }
+            }
+        }
+        let numeric = #"^[+-]?(?:(?:0|[1-9]\d*)(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$"#
+        var replacements: [(NSRange, String)] = []
+        for (name, input) in requests {
+            // Count every declaration, including unsupported multi-declarations, to avoid choosing a scope by accident.
+            let candidates = ts.indices.filter { i in
+                guard ts[i].text == name, i > 0 else { return false }
+                return ["var", "let", "const"].contains(ts[i - 1].text) || ts[i - 1].text == ","
+            }
+            guard candidates.count == 1, let n = candidates.first else { throw Failure(key: candidates.isEmpty ? "override.missing" : "override.ambiguous", name: name) }
+            guard ts[n - 1].text == "var", n + 3 < ts.count, ts[n + 1].text == "=" else { throw Failure(key: "override.unsupported", name: name) }
+            let prefix = (source as NSString).substring(to: ts[n - 1].range.location)
+            let linePrefix = prefix.components(separatedBy: .newlines).last ?? ""
+            guard linePrefix.trimmingCharacters(in: .whitespaces).isEmpty else { throw Failure(key: "override.unsupported", name: name) }
+            let start = n + 2
+            var end = start
+            if ["+", "-"].contains(ts[start].text) { end += 1 }
+            guard end + 1 < ts.count, ts[end + 1].text == ";" else { throw Failure(key: "override.unsupported", name: name) }
+            let range = NSRange(location: ts[start].range.location, length: NSMaxRange(ts[end].range) - ts[start].range.location)
+            let original = (source as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
+            let replacement: String
+            if ts[start].literalString && start == end {
+                let data = try JSONSerialization.data(withJSONObject: input, options: [.fragmentsAllowed])
+                replacement = String(data: data, encoding: .utf8)!.replacingOccurrences(of: "\u{2028}", with: "\\u2028").replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+            } else if original == "true" || original == "false" {
+                let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard value == "true" || value == "false" else { throw Failure(key: "override.boolean", name: name) }
+                replacement = value
+            } else {
+                let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard matches(original, numeric), matches(value, numeric), let number = Double(value), number.isFinite else { throw Failure(key: "override.number", name: name) }
+                replacement = value
+            }
+            replacements.append((range, replacement))
+        }
+        let result = NSMutableString(string: source)
+        for (range, replacement) in replacements.sorted(by: { $0.0.location > $1.0.location }) { result.replaceCharacters(in: range, with: replacement) }
+        return result as String
+    }
+}
+
+/// Sidebar ordering payloads are disjoint from component registration and action movement.
+enum ClassificationKind: String, Codable { case groups, categories }
+struct ClassificationDragPayload: Codable, Equatable {
+    let kind: ClassificationKind
+    let name: String
+    static let prefix = "VectorKeys.classification:"
+    var encoded: String {
+        Self.prefix + String(data: try! JSONEncoder().encode(self), encoding: .utf8)!
+    }
+    static func decode(_ text: String) -> Self? {
+        guard text.utf8.count <= 131072, text.hasPrefix(prefix),
+              let data = String(text.dropFirst(prefix.count)).data(using: .utf8),
+              let value = try? JSONDecoder().decode(Self.self, from: data),
+              !value.name.isEmpty, !value.name.contains("\u{0}") else { return nil }
+        return value
+    }
+}
+extension Library {
+    @discardableResult mutating func reorderClassification(_ name: String, before target: String?, kind: ClassificationKind) -> Bool {
+        let original = kind == .groups ? categoryList : componentCategoryList
+        guard original.contains(name), target != name, target.map(original.contains) ?? true else { return false }
+        var next = original.filter { $0 != name }
+        next.insert(name, at: target.flatMap { next.firstIndex(of: $0) } ?? next.count)
+        guard next != original else { return false }
+        if kind == .groups { categories = next } else { componentCategories = next }
+        return true
+    }
+    func selectedComponentCategories(_ ids: Set<String>, uncategorized: String) -> Set<String> {
+        Set((components ?? []).filter { ids.contains($0.id) }.map { $0.category ?? uncategorized })
+    }
+}

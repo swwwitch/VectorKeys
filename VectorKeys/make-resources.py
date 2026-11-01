@@ -1,0 +1,325 @@
+# coding: utf-8
+from pathlib import Path
+import json
+root = Path(__file__).parent
+APP = 'VectorKeys'
+# Japanese, English, Simplified Chinese, Korean. All UI keys share one validated table.
+rows = '''classification.reorder|分類の並べ替え|Reorder Classifications|重新排列分类|분류 순서 변경
+classification.member|選択したコンポーネントの所属カテゴリ|Category of selected components|所选组件所属类别|선택한 컴포넌트의 카테고리
+classification.drag|ここからドラッグして分類を並べ替え|Drag here to reorder classifications|从此处拖动以重新排序分类|여기서 드래그하여 분류 순서 변경
+action.dragHandle|ここからドラッグして並べ替え・グループ移動|Drag here to reorder or move to a group|从此处拖动以排序或移到组|여기서 드래그하여 순서 변경 또는 그룹 이동
+action.duplicate|複製|Duplicate|复制|복제
+action.copySuffix|のコピー|Copy|的副本|복사본
+invocation.noVariables|対応するSW_変数はありません|No supported SW_ variables|没有支持的SW_变量|지원되는 SW_ 변수가 없습니다
+invocation.refreshVariables|候補を再読み込み|Reload Candidates|重新载入候选|후보 다시 불러오기
+invocation.detectVariables|SW_ユーザー変数を選択|Choose an SW_ User Variable|选择SW_用户变量|SW_ 사용자 변수 선택
+invocation.variableHelp|変数名が空欄なら位置引数として渡します。名前を指定すると、その変数の単純な初期値を実行時だけ差し替えます。|Leave the name empty for a positional argument. A name replaces a simple variable default for this run only.|变量名留空时作为位置参数传递。填写名称时仅在本次执行中替换该变量的简单初始值。|이름을 비우면 위치 인수로 전달합니다. 이름을 지정하면 이번 실행에서만 변수의 단순 초기값을 바꿉니다.
+invocation.variable|変数名（省略可）|Variable name (optional)|变量名（可选）|변수 이름(선택)
+override.syntax|変数を安全に解析できません。%@|Cannot safely parse variable declarations. %@|无法安全解析变量声明。%@|변수 선언을 안전하게 분석할 수 없습니다. %@
+override.identifier|変数名が不正です：%@|Invalid variable name: %@|变量名无效：%@|잘못된 변수 이름: %@
+override.duplicate|同じ変数名が複数の欄にあります：%@|Variable specified more than once: %@|多个输入栏使用同一变量：%@|여러 입력란에 같은 변수 이름이 있습니다: %@
+override.missing|変数の宣言が見つかりません：%@|Variable declaration not found: %@|找不到变量声明：%@|변수 선언을 찾을 수 없습니다: %@
+override.ambiguous|同名の宣言が複数あるため差し替えできません：%@|Multiple declarations prevent replacement: %@|有多个同名声明，无法替换：%@|같은 이름의 선언이 여러 개여서 바꿀 수 없습니다: %@
+override.unsupported|単独行の var 変数 = 初期値; の形式に対応しています：%@|Use a standalone var name = literal; declaration: %@|仅支持独立行 var 变量 = 初始值;：%@|별도 줄의 var 이름 = 리터럴; 선언을 사용하세요: %@
+override.number|数値の初期値と数値の入力が必要です：%@|A numeric default and numeric input are required: %@|需要数值初始值和数值输入：%@|숫자 초기값과 숫자 입력이 필요합니다: %@
+override.boolean|値に true または false を入力してください：%@|Enter true or false: %@|请输入 true 或 false：%@|true 또는 false를 입력하세요: %@
+override.fileText|変数の差し替えはUTF-8のテキストファイルに対応しています：%@|Variable replacement requires a UTF-8 text file: %@|变量替换需要UTF-8文本文件：%@|변수 교체에는 UTF-8 텍스트 파일이 필요합니다: %@
+override.fileContext|このファイルは元の場所に依存するため変数を差し替えできません：%@|This file depends on its original location and cannot use variable replacement: %@|文件依赖原位置，无法替换变量：%@|원래 파일 위치에 의존하여 변수를 바꿀 수 없습니다: %@
+invocation.values|スクリプトに渡す値|Values Passed to Script|传给脚本的值|스크립트에 전달할 값
+invocation.value1|値 1|Value 1|值 1|값 1
+invocation.value2|値 2|Value 2|值 2|값 2
+invocation.value3|値 3|Value 3|值 3|값 3
+componentCategory.assign|カテゴリを変更|Change Category|更改类别|카테고리 변경
+components.addedToGroup|グループに追加しました。|Added to group.|已添加到组。|그룹에 추가했습니다.
+componentSidebar.kind|分類の表示|Classification View|分类视图|분류 표시
+componentCategory.none|未分類|Uncategorized|未分类|미분류
+components.addToGroup|グループに追加|Add to Group|添加到组|그룹에 추가
+componentCategory.title|カテゴリ|Category|类别|카테고리
+componentCategory.new|新しいカテゴリ|New Category|新建类别|새 카테고리
+componentCategory.newTitle|新しいカテゴリの名前|Name of the new category|新类别的名称|새 카테고리 이름
+componentCategory.renameTitle|カテゴリの名前を変更|Rename the category|重命名类别|카테고리 이름 변경
+componentCategory.rename|名前を変更…|Rename…|重命名…|이름 변경…
+componentCategory.delete|カテゴリを削除|Delete Category|删除类别|카테고리 삭제
+componentCategory.deleteDetail|コンポーネントは削除せず、未分類に移します。|Components are kept and become uncategorized.|保留组件并移至未分类。|컴포넌트는 유지하고 미분류로 이동합니다.
+workspace.switch|編集画面|Workspace|编辑界面|편집 화면
+actions.title|アクション|Actions|动作|액션
+components.edit|コンポーネントを編集|Edit Component|编辑组件|컴포넌트 편집
+components.detach|アクションから外す|Remove from Action|从动作移除|액션에서 제거
+components.missing|コンポーネントが見つかりません|Component Missing|找不到组件|컴포넌트 없음
+components.deleteHint|アクションで使用中のコンポーネントは削除できません。元のファイルは削除しません。|Referenced components cannot be deleted. Original files are kept.|不能删除被动作引用的组件。保留原始文件。|액션에서 사용 중인 컴포넌트는 삭제할 수 없습니다. 원본 파일은 유지합니다.
+components.title|コンポーネント|Components|组件|컴포넌트
+components.choose|登録済みコンポーネントから追加…|Add Registered Component…|添加已注册组件…|등록된 컴포넌트 추가…
+components.attach|アクションに追加|Add to Action|添加到动作|액션에 추가
+components.shared|変更は、このコンポーネントを使うすべてのアクションに反映されます。参照中のコンポーネントは削除できません。|Changes affect all actions using this component. Referenced components cannot be deleted.|更改会影响使用此组件的所有动作。不能删除被引用的组件。|변경은 이 컴포넌트를 사용하는 모든 액션에 반영됩니다. 참조 중인 컴포넌트는 삭제할 수 없습니다.
+components.references|使用するアクション：%d件|Used by %d actions|用于%d个动作|사용하는 액션: %d개
+components.select|コンポーネントを選択してください。|Select a component.|请选择组件。|컴포넌트를 선택하세요.
+action.new|アクションを追加|Add Action|添加动作|액션 추가
+group.recent|最近使ったスクリプト|Recently Used Scripts|最近使用的脚本|최근 사용한 스크립트
+source.path|パス|Path|路径|경로
+palette.filenames|ファイル名を追加|Include Filenames|添加文件名|파일 이름 추가
+info.selected|選択しているアイテム|Selected Items|所选项目|선택한 항목
+info.group|選択しているグループ|Selected Group|所选分组|선택한 그룹
+info.all|すべて|All|全部|모두
+divider.title|区切り|Divider|分隔线|구분선
+divider.add|区切りを追加|Add Divider|添加分隔线|구분선 추가
+stats.columns|表示する項目|Visible Columns|显示项目|표시 항목
+stats.path|パス|Path|路径|경로
+watch.autoGroup|サブディレクトリを自動的にカテゴリへ追加|Automatically Categorize Subdirectories|自动将子目录添加为类别|하위 디렉터리 자동 카테고리 추가
+watch.groupHint|初期値OFF。階層は「親/子」のカテゴリ名にします。既存のコンポーネント分類は保持し、アクションのグループは変更しません。|Off by default. Subdirectories create component categories; existing assignments and action groups are preserved.|默认关闭。子目录创建组件类别，保留已有分类和动作组。|기본 꺼짐. 하위 폴더는 컴포넌트 카테고리를 만들며 기존 분류와 액션 그룹은 유지합니다.
+watch.exclusions|除外するフォルダー|Excluded Folders|排除文件夹|제외할 폴더
+watch.saveExclusions|除外設定を保存|Save Exclusions|保存排除设置|제외 설정 저장
+watch.exclusionHint|1行に1つ、フォルダー名を指定します。すべての階層で大文字・小文字を区別せず一致したフォルダーと配下を除外します。登録済みアイテムは削除しません。|One folder name per line. Case-insensitive exact matches at any depth exclude the whole subtree. Existing items are kept.|每行一个名称。任意层级忽略大小写完全匹配，排除其下所有内容。保留已有项目。|한 줄에 폴더 이름 하나. 모든 깊이에서 대소문자 구분 없이 정확히 일치하는 폴더와 하위를 제외하며 기존 항목은 유지합니다.
+tags.title|タグ|Tags|标签|태그
+tags.all|すべてのタグ|All Tags|所有标签|모든 태그
+tags.input|タグをカンマで区切って入力|Enter comma-separated tags|输入标签，以逗号分隔|쉼표로 구분한 태그 입력
+tags.save|タグを保存|Save Tags|保存标签|태그 저장
+tags.fromFolder|フォルダーから：|From folders: |来自文件夹：|폴더에서:
+watch.title|ウォッチフォルダー|Watch Folders|监视文件夹|감시 폴더
+watch.add|フォルダーを追加…|Add Folder…|添加文件夹…|폴더 추가…
+watch.remove|監視を解除|Stop Watching|停止监视|감시 해제
+watch.scan|今すぐ読み込む|Scan Now|立即读取|지금 읽기
+watch.result|%d件確認、新規%d件|Checked %d files, added %d|已检查%d个文件，新增%d个|%d개 확인, %d개 추가
+watch.error|読み取れない場所が%d件あります。フォルダーの接続とアクセス権を確認してください。|Could not read %d locations. Check connection and access.|无法读取%d个位置。请检查连接及访问权限。|%d개 위치를 읽지 못했습니다. 연결과 권한을 확인하세요.
+watch.help|説明|Help|说明|설명
+watch.detail|15秒ごとにサブフォルダーも読み込みます。ルートを除く各階層名をタグとして追加します。隠し項目・シンボリックリンクは読み込みません。既存の名前・キー・メモ・手動タグは保持します。移動・削除された原本や既存タグは自動削除しません。一覧から削除したファイルは監視から再登録しません。監視を解除しても登録済みの項目は残ります。|Scans subfolders every 15 seconds. Each folder name below the root becomes a tag. Hidden files and symlinks are skipped. Names, keys, notes and manual tags are preserved. Missing files and existing tags are retained. Items deleted from the list are not automatically re-added. Stopping watching keeps imported items.|每15秒读取子文件夹，各层名称作为标签。跳过隐藏项和符号链接。保留名称、快捷键、备注及手动标签。不自动删除缺失文件或已有标签。从列表删除的文件不会重新添加。停止监视保留已导入项。|15초마다 하위 폴더를 읽고 각 폴더 이름을 태그로 추가합니다. 숨김 항목과 심볼릭 링크는 제외합니다. 이름, 키, 메모, 수동 태그를 유지합니다. 사라진 파일과 기존 태그는 자동 삭제하지 않습니다. 목록에서 삭제한 파일은 다시 추가하지 않습니다. 감시 해제 후에도 항목을 유지합니다.
+palette.visibility|Illustratorが前面のときだけ表示し、ほかのアプリへ移ると隠します。Illustratorへ戻ると開いていたパレットを再表示します。|Palettes appear only while Illustrator is frontmost. Switching away hides them; returning restores open palettes.|仅在Illustrator位于前台时显示面板。切换应用时隐藏，返回时恢复已打开的面板。|Illustrator가 앞에 있을 때만 표시합니다. 다른 앱으로 전환하면 숨기고 돌아오면 열려 있던 팔레트를 다시 표시합니다.
+item.color|カラー|Color|颜色|색상
+color.none|色なし|No Color|无颜色|색상 없음
+color.red|レッド|Red|红色|빨강
+color.orange|オレンジ|Orange|橙色|주황
+color.yellow|イエロー|Yellow|黄色|노랑
+color.green|グリーン|Green|绿色|초록
+color.blue|ブルー|Blue|蓝色|파랑
+color.purple|パープル|Purple|紫色|보라
+color.gray|グレー|Gray|灰色|회색
+color.selected|選択中|Selected|已选中|선택됨
+palette.name|パレット名|Palette Name|面板名称|팔레트 이름
+palette.nameInvalid|空の名前や、ほかのカテゴリと同じ名前は使えません。|Use a nonempty name that differs from other categories.|名称不能为空或与其他分类重复。|비어 있거나 다른 카테고리와 같은 이름은 사용할 수 없습니다.
+meta.articleURL|解説ページ（noteなど）|Article (note, etc.)|解说页面（note等）|해설 페이지(note 등)
+meta.codeURL|コードURL（GitHubなど）|Code URL (GitHub, etc.)|代码URL（GitHub等）|코드 URL(GitHub 등)
+tools.refreshInfo|スクリプトの情報をアップデート|Update Script Information|更新脚本信息|스크립트 정보 업데이트
+meta.refreshing|情報を更新中…|Updating information…|正在更新信息…|정보 업데이트 중…
+meta.refreshed|スクリプト情報を再読み込みしました。|Script information reloaded.|已重新载入脚本信息。|스크립트 정보를 다시 읽었습니다.
+meta.refreshPartial|ローカル情報を更新しました。オンラインのREADMEを%d件取得できませんでした。|Local information updated. Could not fetch %d online README files.|已更新本地信息。无法获取%d个在线README文件。|로컬 정보를 업데이트했습니다. 온라인 README %d개를 가져오지 못했습니다.
+item.filename|ファイル名|Filename|文件名|파일 이름
+item.display|アイテムの表示設定|Item Display Options|项目显示选项|항목 표시 옵션
+sort.uses|回数|Usage Count|使用次数|사용 횟수
+palette.behavior|パレットの動作|Palette Behavior|面板行为|팔레트 동작
+palette.mode0|パレットを開閉（アイテムのホットキーは実行できる）|Toggle palette (item hotkeys enabled)|切换面板（启用项目快捷键）|팔레트 열기/닫기(항목 단축키 사용)
+palette.mode1|パレットを開閉（アイテムのホットキーは実行できない）|Toggle palette (item hotkeys disabled)|切换面板（禁用项目快捷键）|팔레트 열기/닫기(항목 단축키 사용 안 함)
+palette.mode2|パレットを開き、何か実行したら閉じる|Open palette and close after running an item|打开面板，执行项目后关闭|팔레트를 열고 항목 실행 후 닫기
+palette.behaviorHint|ホットキー無効モードは、パレットを閉じている間もこのグループのアイテムに適用します。実行後に閉じるモードではアイテムのホットキーも使用できます。|Disabled item hotkeys remain disabled while the palette is closed. Auto-close mode allows item hotkeys.|禁用模式在面板关闭时仍禁用此组的项目快捷键。自动关闭模式允许项目快捷键。|단축키 사용 안 함 모드는 팔레트가 닫혀 있어도 적용됩니다. 실행 후 닫기 모드에서는 항목 단축키를 사용할 수 있습니다.
+source.preview|Quick Lookで見る|Quick Look|快速查看|훑어보기
+meta.scriptName|スクリプト名|Script Name|脚本名称|스크립트 이름
+meta.openReadme|READMEを開く|Open README|打开 README|README 열기
+meta.released|初回リリース|First Release|首次发布|최초 릴리스
+meta.releaseDate|リリース日|Release Date|发布日期|릴리스 날짜
+source.reveal|Finderで表示|Show in Finder|在访达中显示|Finder에서 보기
+source.open|ソースコードを開く|Open Source Code|打开源代码|소스 코드 열기
+source.hint|ファイルに関連付けられたアプリで開きます（.jsxbinは対象外）。|Open in the associated app (.jsxbin excluded).|在关联应用中打开（不支持 .jsxbin）。|연결된 앱으로 엽니다(.jsxbin 제외).
+source.failed|ソースコードを開けませんでした。|Could not open the source code.|无法打开源代码。|소스 코드를 열 수 없습니다.
+meta.info|スクリプト情報|Script Information|脚本信息|스크립트 정보
+meta.summary|概要（何をするもの）|Overview|概述|개요
+meta.notes|メモ|Notes|备注|메모
+meta.author|作者|Author|作者|작성자
+meta.target|対象アプリ|Target App|目标应用|대상 앱
+meta.date|更新日|Release Date|发布日期|업데이트 날짜
+meta.absent|未記載|Not provided|未提供|미기재
+palette.settings|パレット|Palettes|面板|팔레트
+palette.keyHint|グループごとにパレットを開くホットキーを設定します。他のアプリの操作中も使用できます。初期状態は未設定です。|Set a hotkey to open each group palette, even while using another app. No keys are assigned by default.|为每个组设置打开面板的快捷键，在其他应用中也可使用。默认未设置。|다른 앱 사용 중에도 각 그룹 팔레트를 여는 단축키를 설정합니다. 기본값은 미설정입니다.
+meta.version|バージョン|Version|版本|버전
+palette.show|パレットとして表示|Show as Palette|显示为面板|팔레트로 표시
+palette.empty|このグループにはスクリプトがありません。|No scripts in this group.|此组中没有脚本。|이 그룹에 스크립트가 없습니다.
+palette.hint|クリックしてIllustratorで実行します。|Click to run in Illustrator.|点按以在 Illustrator 中运行。|클릭하여 Illustrator에서 실행합니다.
+ui.hotkeyHelp|ホットキーの使い方|Hotkey Help|快捷键说明|단축키 도움말
+ui.addStep|コンポーネントを追加|Add Component|添加组件|컴포넌트 추가
+ui.stepNumber|手順 %d|Step %d|步骤 %d|단계 %d
+ui.subtitle|ファイルやJavaScriptをホットキーで実行|Run files and JavaScript with hotkeys|使用快捷键运行文件和 JavaScript|단축키로 파일과 JavaScript 실행
+code.unavailable|実行不可|Unavailable|无法运行|실행 불가
+code.unavailableHint|ファイルが見つからないか、直書きコードが空です。|A file is missing or inline code is empty.|文件不存在或代码为空。|파일이 없거나 직접 입력한 코드가 비어 있습니다.
+code.title|JavaScriptコードの直書き|Inline JavaScript|直接输入 JavaScript|JavaScript 코드 직접 입력
+code.add|JavaScriptコードを追加|Add JavaScript Code|添加 JavaScript 代码|JavaScript 코드 추가
+code.empty|JavaScriptコードを入力してください。|Enter JavaScript code.|请输入 JavaScript 代码。|JavaScript 코드를 입력하세요.
+code.hint|コードはIllustratorで実行されます。|Code runs in Illustrator.|代码在 Illustrator 中运行。|코드는 Illustrator에서 실행됩니다.
+sharing.note|ホットキー全体の有効状態・使用回数表示・並び順を共有します。|Shares global hotkey enablement, usage-count display and sort order.|共享全局快捷键启用状态、使用次数显示和排序。|전체 단축키 활성 상태, 사용 횟수 표시와 정렬 순서를 공유합니다.
+sharing.perMac|スクリプト一覧・実ファイル・項目別ホットキー、起動・常駐・呼び出しホットキー・ウインドウ位置は共有しません。|The script library, files, per-item hotkeys, startup and residency settings, launcher hotkey and window positions stay on this Mac.|不共享脚本列表、文件、各项目快捷键、启动与常驻设置、应用启动快捷键及窗口位置。|스크립트 목록과 파일, 항목별 단축키, 시작 및 상주 설정, 앱 호출 단축키와 윈도우 위치는 공유하지 않습니다.
+heading|Illustratorでスクリプトを高速実行|Run Illustrator Scripts Fast|在 Illustrator 中快速运行脚本|Illustrator에서 스크립트를 빠르게 실행
+subtitle|登録したスクリプトを、Illustratorが前面のときにキーボードショートカットで実行します。|Runs your scripts with keyboard shortcuts while Illustrator is in front.|在 Illustrator 位于前台时，用键盘快捷键运行已登记的脚本。|Illustrator가 앞에 있을 때 등록한 스크립트를 키보드 단축키로 실행합니다.
+useHotkeysHint|オフにすると、スクリプトのショートカットをすべて一時停止します。|When off, all script shortcuts are paused.|关闭后暂停所有脚本快捷键。|끄면 모든 스크립트 단축키를 일시 정지합니다.
+state.hint|スクリプトのショートカットは、Illustratorが前面のときだけ働きます。|Script shortcuts work only while Illustrator is in front.|脚本快捷键仅在 Illustrator 位于前台时有效。|스크립트 단축키는 Illustrator가 앞에 있을 때만 작동합니다.
+addMenu|スクリプトを追加…|Add Scripts…|添加脚本…|스크립트 추가…
+add|追加|Add|添加|추가
+add.skipped|スクリプトではないファイルを%d個とばしました（.jsx・.js・.jsxbin だけ追加できます）。|Skipped %d files that are not scripts (only .jsx, .js and .jsxbin can be added).|已跳过 %d 个非脚本文件（仅可添加 .jsx、.js 和 .jsxbin）。|스크립트가 아닌 파일 %d개를 건너뛰었습니다(.jsx, .js, .jsxbin만 추가 가능).
+empty|スクリプトがまだありません。［スクリプトを追加…］で選ぶか、ここへ .jsx ファイルをドラッグしてください。|No scripts yet. Click Add Scripts… or drag .jsx files here.|还没有脚本。点按“添加脚本…”或将 .jsx 文件拖到此处。|아직 스크립트가 없습니다. [스크립트 추가…]를 클릭하거나 .jsx 파일을 여기로 드래그하세요.
+selectScript|スクリプトを選んでください|Select a script|请选择脚本|스크립트를 선택하세요
+count|%d本|%d scripts|%d 个|%d개
+legacy.badge|旧メニュー手順・実行不可|Legacy menu step — unavailable|旧菜单步骤・不可运行|이전 메뉴 단계 · 실행 불가
+legacy.unsupported|以前のメニュー手順を含むため、この項目は実行しません。保存データは残しています。メニュー手順を削除すると、残ったスクリプトだけを実行できます。|This item contains legacy menu steps and will not run. Its saved data is retained. Remove those steps to run the remaining scripts.|此项目包含旧菜单步骤，因此不会运行。已保留保存的数据。删除菜单步骤后即可运行其余脚本。|이전 메뉴 단계가 있어 이 항목은 실행하지 않습니다. 저장 데이터는 보존됩니다. 메뉴 단계를 삭제하면 남은 스크립트를 실행할 수 있습니다.
+steps|コンポーネント|Components|脚本|스크립트
+steps.count|手順%d|%d steps|%d 个步骤|단계 %d개
+steps.empty|手順がありません。下のボタンで挿入してください。|No steps. Insert one with the buttons below.|没有步骤。请用下方按钮插入。|단계가 없습니다. 아래 버튼으로 넣으세요.
+step.addScript|ファイルの指定|Choose Script File|指定脚本文件|스크립트 파일 지정
+stepMenu|手順の操作|Step actions|步骤操作|단계 작업
+moveUp|上へ|Move Up|上移|위로
+moveDown|下へ|Move Down|下移|아래로
+addItem|追加|Add|添加|추가
+result.fileMissingStep|手順%dのファイルが見つかりません。|The file of step %d was not found.|找不到步骤 %d 的文件。|단계 %d의 파일을 찾을 수 없습니다.
+result.failedStep|手順%dでエラー：%@|Error at step %d: %@|步骤 %d 出错：%@|단계 %d 오류: %@
+undo.steps|手順の変更|Change Steps|更改步骤|단계 변경
+undo.add|追加|Add|添加|추가
+tools.kmOff|選んだスクリプトのKMマクロをオフにする|Turn Off the Selected Scripts’ KM Macros|关闭所选脚本的 KM 宏|선택한 스크립트의 KM 매크로 끄기
+tools.kmOn|選んだスクリプトのKMマクロをオンに戻す|Turn the Selected Scripts’ KM Macros Back On|重新打开所选脚本的 KM 宏|선택한 스크립트의 KM 매크로 다시 켜기
+km.turnOffButton|KMの元のマクロをオフにする（%d本）|Turn Off the Original KM Macros (%d)|关闭 KM 中的原始宏（%d 个）|KM의 원래 매크로 끄기(%d개)
+km.turnedOff|Keyboard Maestroのマクロを%d本オフにしました|Turned off %d Keyboard Maestro macros|已关闭 %d 个 Keyboard Maestro 宏|Keyboard Maestro 매크로 %d개를 껐습니다
+km.turnedOn|Keyboard Maestroのマクロを%d本オンに戻しました|Turned %d Keyboard Maestro macros back on|已重新打开 %d 个 Keyboard Maestro 宏|Keyboard Maestro 매크로 %d개를 다시 켰습니다
+km.denied|Keyboard Maestroを操作する許可がありません。システム設定＞プライバシーとセキュリティ＞オートメーションで、VectorKeysのKeyboard Maestroをオンにしてください。|Not allowed to control Keyboard Maestro. Turn on Keyboard Maestro for VectorKeys in System Settings > Privacy & Security > Automation.|没有控制 Keyboard Maestro 的权限。请在“系统设置”>“隐私与安全性”>“自动化”中为 VectorKeys 打开 Keyboard Maestro。|Keyboard Maestro를 제어할 권한이 없습니다. 시스템 설정 > 개인정보 보호 및 보안 > 자동화에서 VectorKeys의 Keyboard Maestro를 켜세요.
+km.failed|Keyboard Maestroのマクロを切り替えられませんでした：%@|Could not switch the Keyboard Maestro macros: %@|无法切换 Keyboard Maestro 宏：%@|Keyboard Maestro 매크로를 전환하지 못했습니다: %@
+undo.import|取り込み|Import|导入|가져오기
+undo.delete|削除|Delete|删除|삭제
+undo.rename|名前の変更|Rename|重命名|이름 변경
+undo.category|グループの変更|Change Group|更改组|그룹 변경
+undo.newCategory|カテゴリの作成|New Category|新建类别|카테고리 만들기
+undo.renameCategory|カテゴリ名の変更|Rename Category|重命名类别|카테고리 이름 변경
+undo.deleteCategory|カテゴリの削除|Delete Category|删除类别|카테고리 삭제
+tools.stats|統計…|Statistics…|统计…|통계…
+stats.title|使用回数の統計|Run Statistics|使用次数统计|사용 횟수 통계
+stats.total|合計%d回・使ったスクリプト%d本／全%d本|%d runs in all · %d of %d scripts used|共 %d 次 · 已使用 %d 个／共 %d 个|합계 %d회 · 사용한 스크립트 %d개 / 전체 %d개
+stats.uses|回数|Runs|次数|횟수
+stats.last|最終実行|Last Run|最近运行|최근 실행
+stats.hint|使った回数の多い順です（エラーなく終わった実行を数えます）。行をダブルクリックすると、メインウインドウでそのスクリプトを選びます。|Most runs first (runs that finished without an error). Double-click a row to select the script in the main window.|按使用次数从多到少排列（统计无错误完成的运行）。双击某行可在主窗口中选中该脚本。|사용 횟수가 많은 순입니다(오류 없이 끝난 실행을 셉니다). 행을 더블클릭하면 메인 윈도우에서 그 스크립트를 선택합니다.
+tools.replace|アイテム名の検索と置換…|Find and Replace in Names…|在名称中查找和替换…|이름 찾기 및 바꾸기…
+replace.title|アイテム名の検索と置換|Find and Replace in Names|在名称中查找和替换|이름 찾기 및 바꾸기
+replace.detail|選んだ%d本の名前が対象です。ファイル名は変わりません。|Applies to the names of the %d selected scripts. File names stay.|对所选 %d 个脚本的名称生效。文件名不变。|선택한 스크립트 %d개의 이름이 대상입니다. 파일 이름은 바뀌지 않습니다.
+replace.find|検索|Find|查找|찾기
+replace.with|置換|Replace|替换为|바꾸기
+replace.regex|正規表現|Regular expression|正则表达式|정규 표현식
+replace.caseSensitive|大文字と小文字を区別|Match case|区分大小写|대소문자 구분
+replace.to|置換後|becomes|替换为|바뀐 이름
+replace.changes|%d本が変わります|%d names change|%d 个名称将更改|이름 %d개가 바뀝니다
+replace.button|置換|Replace|替换|바꾸기
+replace.badPattern|正規表現が正しくありません。|The regular expression is not valid.|正则表达式无效。|정규 표현식이 올바르지 않습니다.
+replace.done|%d本の名前を置換しました|Replaced %d names|已替换 %d 个名称|이름 %d개를 바꿨습니다
+viewMenu|表示|View|显示|보기
+toolsMenu|ツール|Tools|工具|도구
+tools.stripNumbering|KMマクロのナンバリングを削除|Remove KM Macro Numbering|删除 KM 宏编号|KM 매크로 번호 삭제
+tools.stripped|%d本の名前から番号を外しました|Removed the numbering from %d names|已从 %d 个名称中删除编号|이름 %d개에서 번호를 지웠습니다
+selectedCount|%d本を選択中|%d scripts selected|已选择 %d 个|%d개 선택됨
+selectedHint|選んだスクリプトを左のグループへドラッグしても振り分けられます。⌘クリック・⇧クリックで選択を増やせます。|You can also drag the selected scripts onto a group on the left. ⌘-click or ⇧-click to select more.|也可以将所选脚本拖到左侧的组。⌘点按或⇧点按可增加选择。|선택한 스크립트를 왼쪽 그룹로 드래그해도 나눌 수 있습니다. ⌘클릭·⇧클릭으로 선택을 늘릴 수 있습니다.
+category.mixed|（複数）|(Mixed)|（多个）|(여러 개)
+category|グループ|Group|组|그룹
+category.all|すべて|All|全部|전체
+category.none|未分類|Ungrouped|未分组|미분류
+category.new|新しいグループ|New Group|新建组|새 그룹
+category.newTitle|新しいグループの名前|Name of the new group|新组的名称|새 그룹 이름
+category.renameTitle|グループの名前を変更|Rename the group|重命名组|그룹 이름 변경
+category.rename|名前を変更…|Rename…|重命名…|이름 변경…
+category.delete|グループを削除|Delete Group|删除组|그룹 삭제
+category.deleteConfirm|グループ「%@」を削除しますか？|Delete the group “%@”?|删除组“%@”？|그룹 “%@”을(를) 삭제할까요?
+category.deleteDetail|アクションは削除せず、未分類に移します。|Actions are kept and become ungrouped.|保留动作并移至未分组。|액션은 유지하고 미분류로 이동합니다.
+category.name|グループ名|Group name|组名称|그룹 이름
+taps.label|押し方|Press|按法|누르는 방법
+taps.single|1回押す|Press once|按一次|한 번 누르기
+taps.double|2回押す|Press twice|按两次|두 번 누르기
+taps.hint|「2回押す」は続けて2回押したときに実行します。同じキーに「1回押す」のスクリプトもあると、そちらは2回目を待つ分（約0.3秒）遅れて実行します。|Press twice runs on two presses in a row. When the same key also has a Press once script, that one waits for a second press (about 0.3 s) before it runs.|“按两次”在连续按两次时运行。若同一按键还有“按一次”的脚本，该脚本会等待第二次按下（约 0.3 秒）后再运行。|'두 번 누르기'는 연속으로 두 번 눌렀을 때 실행합니다. 같은 키에 '한 번 누르기' 스크립트도 있으면 그쪽은 두 번째 누름을 기다리는 만큼(약 0.3초) 늦게 실행됩니다.
+sort.label|並べ替え|Sort|排序|정렬
+sort.manual|手動|Manual|手动|수동
+sort.name|名前順|By Name|按名称|이름순
+sort.hotkey|ショートカット順|By Shortcut|按快捷键|단축키순
+sort.hint|一覧の並べ方。ドラッグで並べ替えられるのは「手動」で検索していないときです。同じキーが重なったときは、手動の並びで上にあるスクリプトが反応します。|How the list is ordered. Drag to reorder in Manual while not searching. When scripts share a key, the one higher in the manual order reacts.|列表的排序方式。在“手动”且未搜索时可拖移重新排序。多个脚本使用同一按键时，手动顺序中靠上的脚本会响应。|목록 정렬 방식. '수동'이고 검색하지 않을 때 드래그로 순서를 바꿀 수 있습니다. 같은 키를 쓰는 스크립트가 있으면 수동 순서에서 위에 있는 것이 반응합니다.
+showUses|使用回数を表示|Show run counts|显示使用次数|사용 횟수 표시
+uses.count|%d回|%d runs|%d 次|%d회
+uses.detail|実行回数：%d回（最終：%@）|Runs: %d (last: %@)|运行次数：%d 次（最近：%@）|실행 횟수: %d회(최근: %@)
+uses.never|まだ実行していません|Not run yet|尚未运行|아직 실행하지 않음
+uses.hint|ショートカットと［実行］ボタンで、エラーなく終わった回数です。|Runs that finished without an error, from the shortcut or the Run button.|通过快捷键和“运行”按钮无错误完成的次数。|단축키와 [실행] 버튼으로 오류 없이 끝난 횟수입니다.
+km.import|Keyboard Maestroから取り込む…|Import from Keyboard Maestro…|从 Keyboard Maestro 导入…|Keyboard Maestro에서 가져오기…
+km.title|Keyboard Maestroからの取り込み|Import from Keyboard Maestro|从 Keyboard Maestro 导入|Keyboard Maestro에서 가져오기
+km.added|%d本を追加しました。|Added %d scripts.|已添加 %d 个脚本。|스크립트 %d개를 추가했습니다.
+km.already|%d本は登録済みのため追加しませんでした。|%d were already in the list.|%d 个已在列表中，未添加。|%d개는 이미 등록되어 추가하지 않았습니다.
+km.skipped|VectorKeysで実行できない手順を含むため、%d本は取り込みませんでした：|%d macros were not imported because they have steps VectorKeys cannot run:|%d 个宏含有 VectorKeys 无法运行的步骤，因此未导入：|VectorKeys에서 실행할 수 없는 단계가 있어 %d개는 가져오지 않았습니다:
+km.more|ほか%d本|and %d more|另有 %d 个|외 %d개
+km.reason.notScript|実行できる手順なし|nothing it can run|无可运行的步骤|실행할 수 있는 단계 없음
+km.reason.severalSteps|実行できない手順あり|steps it cannot run|含无法运行的步骤|실행할 수 없는 단계 있음
+km.reason.variable|変数を使用|uses variables|使用变量|변수 사용
+km.reason.notJSX|.jsx以外のファイル|not a .jsx file|非 .jsx 文件|.jsx 이외의 파일
+km.saveFailed|コードをファイルに保存できませんでした：%@|Could not save the code as a file: %@|无法将代码存储为文件：%@|코드를 파일로 저장하지 못했습니다: %@
+km.unreadable|読み込めないファイル：%@|Could not read: %@|无法读取：%@|읽을 수 없는 파일: %@
+km.turnOff|同じショートカットのマクロがKeyboard Maestroで有効なままだと、スクリプトが2回実行されます。下のボタンか［ツール］からオフにできます。|If the same macros stay on in Keyboard Maestro, the scripts run twice. Turn them off with the button below or from Tools.|如果 Keyboard Maestro 中的同名宏仍然启用，脚本会运行两次。可用下方按钮或“工具”关闭它们。|Keyboard Maestro에서 같은 매크로가 켜져 있으면 스크립트가 두 번 실행됩니다. 아래 버튼이나 [도구]에서 끌 수 있습니다.
+listSeparator|、|, |、|,
+reveal|Finderに表示|Show in Finder|在访达中显示|Finder에서 보기
+relink|ファイルを選び直す…|Choose Another File…|重新选择文件…|파일 다시 선택…
+badge.missing|ファイルなし|Missing|文件丢失|파일 없음
+badge.missingHint|ファイルが見つかりません。移動した場合は［ファイルを選び直す…］で指定し直してください。|File not found. If it was moved, use Choose Another File… to point to it.|找不到文件。如果已移动，请用“重新选择文件…”重新指定。|파일을 찾을 수 없습니다. 이동했다면 [파일 다시 선택…]으로 다시 지정하세요.
+runHint|Illustratorを前面にしてから実行します。|Brings Illustrator to the front, then runs.|先将 Illustrator 置于前台再运行。|Illustrator를 앞으로 가져온 뒤 실행합니다.
+hotkeyHint|Illustratorが前面のときだけ働きます。Illustrator自身のショートカットと同じキーにすると、こちらが優先されます。|Works only while Illustrator is in front. A key that Illustrator also uses runs the script instead.|仅在 Illustrator 位于前台时有效。若与 Illustrator 自身的快捷键相同，则优先运行脚本。|Illustrator가 앞에 있을 때만 작동합니다. Illustrator 자체 단축키와 같은 키라면 스크립트가 우선합니다.
+hotkey.duplicate|ほかのスクリプトと同じキーです。一覧で上にあるスクリプトだけが反応します。|Same key as another script; only the one higher in the list reacts.|与另一个脚本的按键相同，只有列表中靠上的脚本会响应。|다른 스크립트와 같은 키입니다. 목록에서 위에 있는 스크립트만 반응합니다.
+deleteConfirm|選んだスクリプトを一覧から削除しますか？|Remove the selected scripts from the list?|从列表中删除所选脚本？|선택한 스크립트를 목록에서 삭제할까요?
+deleteConfirmDetail|ファイルそのものは削除しません。ショートカットの割り当ては消えます。|The file itself is not deleted. Its shortcut is removed.|不会删除文件本身，但会移除其快捷键。|파일 자체는 삭제하지 않습니다. 단축키 지정은 사라집니다.
+saveFailed|一覧を保存できませんでした：%@|Could not save the list: %@|无法存储列表：%@|목록을 저장하지 못했습니다: %@
+aboutDetail|登録したスクリプトを、Illustratorが前面のときにキーボードショートカットで実行します。サポート：同梱のREADME.md|Runs your scripts with keyboard shortcuts while Illustrator is in front. Support: bundled README.md|在 Illustrator 位于前台时用键盘快捷键运行已登记的脚本。支持：内置 README.md|Illustrator가 앞에 있을 때 등록한 스크립트를 키보드 단축키로 실행합니다. 지원: 포함된 README.md
+openMainWindow|メインウインドウを開く|Open Main Window|打开主窗口|메인 윈도우 열기
+settings|設定…|Settings…|设置…|설정…
+settingsWindow|設定|Settings|设置|설정
+help|{APP}ヘルプ|{APP} Help|{APP} 帮助|{APP} 도움말
+helpMenu|ヘルプ|Help|帮助|도움말
+quit|{APP}を終了|Quit {APP}|退出 {APP}|{APP} 종료
+hide|{APP}を隠す|Hide {APP}|隐藏 {APP}|{APP} 가리기
+services|サービス|Services|服务|서비스
+hideOthers|ほかを隠す|Hide Others|隐藏其他|기타 가리기
+showAll|すべてを表示|Show All|全部显示|모두 보기
+about|{APP}について|About {APP}|关于 {APP}|{APP}에 관하여
+fileMenu|ファイル|File|文件|파일
+editMenu|編集|Edit|编辑|편집
+windowMenu|ウインドウ|Window|窗口|윈도우
+minimize|しまう|Minimize|最小化|최소화
+zoom|拡大／縮小|Zoom|缩放|확대/축소
+bringAllToFront|すべてを手前に移動|Bring All to Front|前置全部窗口|모두 앞으로 가져오기
+close|ウインドウを閉じる|Close Window|关闭窗口|윈도우 닫기
+undo|取り消す|Undo|撤销|실행 취소
+redo|やり直す|Redo|重做|실행 복귀
+cut|カット|Cut|剪切|오려두기
+copy|コピー|Copy|拷贝|복사하기
+paste|ペースト|Paste|粘贴|붙여넣기
+selectAll|すべてを選択|Select All|全选|모두 선택
+cancel|キャンセル|Cancel|取消|취소
+resident|ウインドウを閉じても常駐|Keep running after closing the window|关闭窗口后继续运行|윈도우를 닫아도 계속 실행
+residentDetail|閉じた後もDockやメニューバーから再表示できます。オフにすると閉じたときに終了し、ホットキーも使えなくなります。|Reopen from the Dock or menu bar. When off, closing the window quits and the hotkeys stop.|可从 Dock 或菜单栏再次打开。关闭此项时，关闭窗口即退出，快捷键也会停止。|Dock 또는 메뉴 막대에서 다시 열 수 있습니다. 끄면 창을 닫을 때 종료되고 단축키도 멈춥니다.
+launchShortcut|アプリ起動のホットキー|App launch keyboard shortcut|启动应用快捷键|앱 실행 키보드 단축키
+openShortcuts|ショートカットを開く|Open Shortcuts|打开快捷指令|단축어 열기
+shortcutDetail|ショートカットAppで「アプリを開く」に{APP}を指定し、キーを割り当ててください。未起動時も使えます。|In Shortcuts, create an Open App action for {APP} and assign a key. It works even when the app is not running.|在快捷指令中为 {APP} 创建“打开 App”并分配按键，应用未运行时也可使用。|단축어 앱에서 {APP}을 여는 동작을 만들고 키를 지정하세요. 앱이 실행 중이 아니어도 작동합니다.
+appHotkeyHint|{APP}の起動中に押すと、どのアプリからでもメインウインドウを表示します。未起動のときは上の「ショートカットを開く」で割り当てたキーを使ってください。|While {APP} is running, press it in any app to show the main window. When it is not running, use the key assigned with Open Shortcuts above.|{APP} 运行时，在任何应用中按下即可显示主窗口。未运行时请使用上方“打开快捷指令”中分配的按键。|{APP}이 실행 중일 때 어느 앱에서든 누르면 메인 윈도우를 표시합니다. 실행 중이 아닐 때는 위의 '단축어 열기'에서 지정한 키를 사용하세요.
+pauseHotkeys|ホットキーを一時停止|Pause Hotkeys|暂停快捷键|단축키 일시 정지
+resumeHotkeys|ホットキーを再開|Resume Hotkeys|恢复快捷键|단축키 재개
+useHotkeys|ホットキーを使う|Use hotkeys|使用快捷键|단축키 사용
+search|検索|Search|搜索|검색
+recent|最近の実行|Recent Runs|最近运行|최근 실행
+recentEmpty|まだありません。履歴は保存せず、終了すると消えます。|None yet. Not saved; cleared when the app quits.|暂无。不会保存，退出应用时清除。|아직 없습니다. 저장하지 않으며 앱을 종료하면 지워집니다.
+a11y.error|失敗|Failed|失败|실패
+a11y.success|成功|Succeeded|成功|성공
+run|実行|Run|运行|실행
+delete|削除|Delete|删除|삭제
+name|名前|Name|名称|이름
+enabledHint|ホットキーのオン・オフ|Hotkey on or off|快捷键开关|단축키 켜기/끄기
+hotkey|ホットキー|Hotkey|快捷键|단축키
+hotkey.failed|このキーを登録できませんでした。ほかのアプリが使っている可能性があります。|This key could not be registered; another app may be using it.|无法注册此按键，可能被其他应用占用。|이 키를 등록하지 못했습니다. 다른 앱이 사용 중일 수 있습니다.
+result.success|完了|Done|完成|완료
+result.busy|前の実行が続いているため、実行しませんでした。|Skipped: earlier runs are still going.|已跳过：之前的运行仍在进行。|건너뜀: 이전 실행이 아직 진행 중입니다.
+result.noIllustrator|Illustratorが起動していません。|Illustrator is not running.|Illustrator 未运行。|Illustrator가 실행 중이 아닙니다.
+result.automation|Illustratorを操作する許可がありません。システム設定＞プライバシーとセキュリティ＞オートメーションで、{APP}のAdobe Illustratorをオンにしてください。|Not allowed to control Illustrator. Turn on Adobe Illustrator for {APP} in System Settings > Privacy & Security > Automation.|没有控制 Illustrator 的权限。请在“系统设置”>“隐私与安全性”>“自动化”中为 {APP} 打开 Adobe Illustrator。|Illustrator를 제어할 권한이 없습니다. 시스템 설정 > 개인정보 보호 및 보안 > 자동화에서 {APP}의 Adobe Illustrator를 켜세요.
+state.front|Illustratorが前面：ホットキー有効|Illustrator in front: hotkeys on|Illustrator 在前台：快捷键有效|Illustrator가 앞에 있음: 단축키 사용
+state.back|Illustratorが背面：ホットキー待機中|Illustrator not in front: hotkeys waiting|Illustrator 不在前台：快捷键待机|Illustrator가 뒤에 있음: 단축키 대기'''
+# Shared menu / settings rows carry {APP}.
+rows = rows.replace('{APP}', APP)
+table = [line.split('|') for line in rows.splitlines() if line]
+assert all(len(r) == 5 for r in table), [r[0] for r in table if len(r) != 5]
+assert len({r[0] for r in table}) == len(table), 'duplicate key'
+
+# Help text lives in help_text.py (markup rendered by Shared/AppStandards/HelpDocument.swift).
+from help_text import HELP
+USAGE = ["登録したスクリプトをIllustratorで実行し、取り込んだKeyboard Maestroの元のマクロをオン・オフするために使用します。", "Used to run your registered scripts in Illustrator and to turn imported Keyboard Maestro macros off or on.", "用于在 Illustrator 中运行已登记的脚本，以及关闭或打开已导入的 Keyboard Maestro 宏。", "등록한 스크립트를 Illustrator에서 실행하고 가져온 Keyboard Maestro 매크로를 끄고 켜는 데 사용합니다."]
+for i, lang in enumerate(['ja', 'en', 'zh-Hans', 'ko']):
+    p = root / 'Resources' / f'{lang}.lproj'
+    p.mkdir(parents=True, exist_ok=True)
+    (p / 'Localizable.strings').write_text('\n'.join(f'{json.dumps(r[0])} = {json.dumps(r[i + 1], ensure_ascii=False)};' for r in table) + '\n')
+    (p / 'InfoPlist.strings').write_text(f'"CFBundleDisplayName" = "{APP}";\n"NSAppleEventsUsageDescription" = {json.dumps(USAGE[i], ensure_ascii=False)};\n')
+    (p / 'Help.txt').write_text(HELP[lang])
+print('resources:', len(table), 'keys x 4 languages')
